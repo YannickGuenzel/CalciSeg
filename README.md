@@ -24,6 +24,7 @@ Running CalciSeg
 ----------------
 Both **CalciSeg** and **CalciSeg_3D** are MATLAB functions that can be called from anywhere in your code. Note that both depend on the *Parallel Computing Toolbox*. It is reconmended to starts a parallel pool of workers before calling the function.
 For **CalciSeg**, use the following input:
+
 CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 - stack : 3-D matrix (x*y*time)
 - projection_method : method for calculating the projection across time
@@ -44,6 +45,7 @@ CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, re
 - minPixCount : Minimum pixel area. Use 'auto' for an automatic assessment. Or provide a number, *e.g.*, minPixCount=10 for at least 10 pixels per region.
 
 For **CalciSeg_3D**, the input remains similar. Note the additional parameter *aspect_ratio* to account for differences in x-y-z dimensions. Further, the input *stack* is now expected to a 4-D matrix (x*y*z-time).
+
 CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 
 Both functions return two variables:
