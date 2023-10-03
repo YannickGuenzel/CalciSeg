@@ -37,13 +37,13 @@ function [pockets_labeled, summary_stats] = CalciSeg_3D(stack, aspect_ratio, pro
 %       pockets_labeled    : pocket labels
 %       summary_stats      : avg, std, corr for each pocker
 %                    .pocket_Avg           : within-pocket average activity
-%                    .pocket_Corr_img      : average activity image (x*y)
+%                    .pocket_Corr_img      : average activity image (x*y*z)
 %                    .pocket_Std           : each pocket's std over time
 %                    .pocket_Std           : each pocket's std over time as image
 %                    .pocket_Corr          : within-pocket correlation
-%                    .pocket_Corr_img      : correlation image (x*y)
+%                    .pocket_Corr_img      : correlation image (x*y*z)
 %                    .active_region.map    : binary map of active regions
-%                    .active_region.method : 
+%                    .active_region.method : method used for binarizing
 %
 % Version: 03-Oct-23 (R2023a)
 

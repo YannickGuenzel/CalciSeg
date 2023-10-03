@@ -1,8 +1,8 @@
 function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-% CalciSeg(stack, projection_method, regmax_method, n_rep, minPixCount)
+% CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 % segments the spatial aspects of a stack (x*y*time) into individual
 % regions ('granules') based on a refined 2D Delaunay triangulation.
-% Note: CalciSeg_3D uses parallel for-loops at for the local growing 
+% Note: CalciSeg uses parallel for-loops at for the local growing 
 % algorithm and the refinement process. It is reconmended to starts a 
 % parallel pool of workers before calling the function.
 %
@@ -41,6 +41,8 @@ function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, i
 %                    .pocket_Std         : each pocket's std over time as image
 %                    .pocket_Corr        : within-pocket correlation
 %                    .pocket_Corr_img    : correlation image (x*y)
+%                    .active_region.map    : binary map of active regions
+%                    .active_region.method : method used for binarizing
 %
 % Version: 03-Oct-23 (R2023a)
 
