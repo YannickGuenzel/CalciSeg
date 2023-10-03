@@ -1,13 +1,14 @@
-function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-% CalciSeg(stack, projection_method, regmax_method, n_rep, minPixCount)
-% segments the spatial aspects of a stack (x*y*time) into individual
-% regions ('granules') based on a refined 2D Delaunay triangulation.
+function [pockets_labeled, summary_stats] = CalciSeg_3D(stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
+% CalciSeg_3D(stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
+% segments the spatial aspects of a stack (x*y*y*time) into individual
+% regions ('granules') based on a refined 3D Delaunay triangulation.
 % Note: CalciSeg_3D uses parallel for-loops at for the local growing 
 % algorithm and the refinement process. It is reconmended to starts a 
 % parallel pool of workers before calling the function.
 %
 % Input:
-%       stack             : 3-D matrix (x*y*time)
+%       stack             : 4-D matrix (x*y*z,time)
+%       aspect_ratio      : x-y-z aspect ratio. Leave empty for default [1 1 1]
 %       projection_method : method for calculating the projection across time
 %                             - 'std'  - standard deviation projection
 %                             - 'mean' - mean projection
@@ -19,7 +20,7 @@ function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, i
 %                           extrema
 %                             - 'raw'      - simply apply imregionalmax/-min on the projection
 %                             - 'filtered' - dilate/erode image to apply
-%                                            moving max/min filter before 
+%                                            moving max/min filter before
 %                                            applying imregionalmax/-min 
 %                             - 'both'     - combine both above-mentioned methods
 %       n_rep             : Number of iterations for refining the regions.
@@ -35,19 +36,21 @@ function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, i
 %       pockets            : grayscale showing pocket distribution
 %       pockets_labeled    : pocket labels
 %       summary_stats      : avg, std, corr for each pocker
-%                    .pocket_Avg         : within-pocket average activity
-%                    .pocket_Corr_img    : average activity image (x*y)
-%                    .pocket_Std         : each pocket's std over time
-%                    .pocket_Std         : each pocket's std over time as image
-%                    .pocket_Corr        : within-pocket correlation
-%                    .pocket_Corr_img    : correlation image (x*y)
+%                    .pocket_Avg           : within-pocket average activity
+%                    .pocket_Corr_img      : average activity image (x*y)
+%                    .pocket_Std           : each pocket's std over time
+%                    .pocket_Std           : each pocket's std over time as image
+%                    .pocket_Corr          : within-pocket correlation
+%                    .pocket_Corr_img      : correlation image (x*y)
+%                    .active_region.map    : binary map of active regions
+%                    .active_region.method : 
 %
 % Version: 03-Oct-23 (R2023a)
 
 % Validate inputs
 stack = squeeze(stack);
 error_message = '';
-[valid, error_message] = validateInputs(error_message, stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount);
+[valid, error_message] = validateInputs(error_message, stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount);
 if valid == -1
     error(error_message);
 elseif valid == 0
@@ -59,11 +62,11 @@ end
 
 % Perform initial segmentation
 if isnumeric(minPixCount) 
-    filter_size = ceil(sqrt(minPixCount/pi)) + double(minPixCount==0);
+    filter_size = ceil(((3*minPixCount)/(4*pi))^(1/3)) + double(minPixCount==0);
 elseif strcmp(minPixCount, 'auto')
     filter_size = 1;
 end
-pockets_labeled = initialSegmentation(stack, reshaped_stack, projection, regmax_method, init_segment_method, filter_size);
+pockets_labeled = initialSegmentation(stack, aspect_ratio, reshaped_stack, projection, regmax_method, init_segment_method, filter_size);
 
 % Maybe, the user wants to have the min size estimated based on the data
 if (isstring(minPixCount) || ischar(minPixCount)) && strcmp(minPixCount, 'auto')
@@ -86,14 +89,20 @@ end%FCN:CalciSeg_optimized
 
 
 
-function [valid, error_message] = validateInputs(error_message, stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
+function [valid, error_message] = validateInputs(error_message, stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 % Initialize output variables
 valid = 1;
 
 % Validate 'stack' input
-if ndims(stack) ~= 3
+if ndims(stack) ~= 4
     valid = 0;
     error_message = 'Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_segment_method="voronoi"; refinement_method="rmse"). ';
+end%if invalid 'stack' input
+
+% Validate 'aspect_ratio' input
+if ~isnumeric(aspect_ratio) || length(aspect_ratio) ~= 3 || isempty(aspect_ratio)
+    valid = 0;
+    error_message = [error_message, 'Input "aspect_ratio" was set to be the default of [1 1 1]. '];
 end%if invalid 'stack' input
 
 % Validate 'projection_method' input
@@ -147,7 +156,7 @@ end%FCN:validateInputs
 
 function [reshaped_stack, projection, refinement_method, init_segment_method] = initialPreprocessing(stack, projection_method, refinement_method, init_segment_method)
 % Get the size of the stack
-[x, y, t] = size(stack);
+[x, y, z, t] = size(stack);
 
 % Check the time dimension and adjust parameters accordingly
 if t == 1
@@ -157,7 +166,7 @@ if t == 1
 end%if no temporal component
 
 % Reshape the stack to a 2D matrix for further processing
-reshaped_stack = reshape(stack, x*y, t);
+reshaped_stack = reshape(stack, x*y*z, t);
 
 % Initialize the projection variable
 projection = [];
@@ -165,11 +174,11 @@ projection = [];
 % Calculate the projection based on the specified method
 switch projection_method
     case 'std'
-        projection = nanstd(stack, [], 3);
+        projection = nanstd(stack, [], 4);
     case 'mean'
-        projection = nanmean(stack, 3);
+        projection = nanmean(stack, 4);
     case 'max'
-        projection = nanmax(stack, [], 3);
+        projection = nanmax(stack, [], 4);
     case 'none'
         projection = stack;
 end%switch projection method
@@ -178,13 +187,13 @@ end%FCN:initialPreprocessing
 
 
 
-function pockets_labeled = initialSegmentation(stack, reshaped_stack, projection, regmax_method, init_segment_method, filter_size)
+function pockets_labeled = initialSegmentation(stack, aspect_ratio, reshaped_stack, projection, regmax_method, init_segment_method, filter_size)
 switch init_segment_method
     case 'voronoi'
         % Get local maxima and minima
         [regional_maxima, regional_minima] = identifyLocalExtrema(projection, regmax_method, filter_size);
         % 2-D Delaunay triangulation
-        pockets_labeled = triang_extrema(regional_maxima, regional_minima);
+        pockets_labeled = triang_extrema(regional_maxima, regional_minima, aspect_ratio);
     case 'corr'
         pockets_labeled = growing_regions(projection, stack, reshaped_stack, regmax_method, filter_size);
 end%switch init_segment_method
@@ -192,36 +201,52 @@ end%FCN:initialSegmentation
 
 
 
-function pockets_labeled = triang_extrema(regional_maxima, regional_minima)
+function pockets_labeled = triang_extrema(regional_maxima, regional_minima, aspect_ratio)
 % Erode the extrema location to keep the controids only
-ultimateErosion = bwulterode(regional_maxima>0) + bwulterode(regional_minima>0);
+ultimateErosion = bwulterode((double(regional_maxima) + double(regional_minima)), 26);
+% Reduce to single voxels
+[L, num] = bwlabeln(ultimateErosion, 26);
+centroid_V = zeros(size(ultimateErosion));
+% Iterate over all regions
+for iVox = 1:num
+    % Get the x, y, z coordinates of the current component
+    [x,y,z] = ind2sub(size(ultimateErosion), find(L == iVox)); 
+    % Calculate and round the centroid
+    centroid = round(mean([x(:),y(:),z(:)],1)); 
+    % Mark the centroid in the centroid_V matrix
+    centroid_V(centroid(1), centroid(2), centroid(3)) = 1;
+end%iVox
+% Multiply the original map of extrema location in order to account for
+% wrong assignments where there was no extrema location before
+ultimateErosion = ultimateErosion.*centroid_V;
 % Include points that are on the edge of the image. Later, we will set all
 % regions that are at the edge to zero
-ultimateErosion(1,:) = 1; ultimateErosion(:,1) = 1;
-ultimateErosion(end,:) = 1; ultimateErosion(:,end) = 1;
+ultimateErosion(1,:,:) = 1; ultimateErosion(:,1,:) = 1; ultimateErosion(:,:,1) = 1;
+ultimateErosion(end,:,:) = 1; ultimateErosion(:,end,:) = 1; ultimateErosion(:,:,end) = 1;
 % Segment image based on these maxima using a 2-D Delaunay
 % triangulation
 % Get linear indices of local maxima
 linearIndices = find(ultimateErosion);
 % Convert linear indices to (x, y, z) coordinates
-[Cx, Cy] = ind2sub(size(ultimateErosion), linearIndices);
+[Cx, Cy, Cz] = ind2sub(size(ultimateErosion), linearIndices);
 % Combine coordinates into Nx3 matrix
-C = [Cx, Cy]; clear Cx Cy
+C = [Cx, Cy, Cz]; clear Cx Cy Cz
+C = C.*aspect_ratio;
 % Segment image based on these maxima using a 2-D Delaunay
 % triangulation (i.e. assign pixels to the closest extrem point
 % Convert linear indices to (x, y, z) coordinates
 linearIndices = 1:numel(regional_maxima);
-[x, y] = ind2sub(size(regional_maxima), linearIndices);
+[x, y, z] = ind2sub(size(regional_maxima), linearIndices);
 % Combine all and adjust aspect ratio;
-allVoxels = [x(:), y(:)];
+allVoxels = [x(:), y(:), z(:)];
 clear x y z linearIndices
 % Use knnsearch to find the index of the closest point in 'C' for each voxel
 pockets_labeled = knnsearch(C, allVoxels);
 % Reshape the resulting index array to the dimensions of the 3D volume
 pockets_labeled = reshape(pockets_labeled, size(regional_maxima));
 % Remove border
-ultimateErosion(1,:) = 0; ultimateErosion(:,1) = 0;
-ultimateErosion(end,:) = 0; ultimateErosion(:,end) = 0;
+ultimateErosion(1,:,:) = 0; ultimateErosion(:,1,:) = 0; ultimateErosion(:,:,1) = 0;
+ultimateErosion(end,:,:) = 0; ultimateErosion(:,end,:) = 0; ultimateErosion(:,:,end) = 0;
 linearIndices = find(ultimateErosion);
 % Create a logical mask
 mask = ismember(pockets_labeled, pockets_labeled(linearIndices));
@@ -230,26 +255,26 @@ end%FCN:triang_extrema
 
 
 
-function [regional_maxima, regional_minima] = identifyLocalExtrema(projection, regmax_method, filter_size)
+function [regional_maxima, regional_minima] = identifyLocalExtrema(projection, regmax_method)
 % Initialize the output variables
 regional_maxima = [];
 regional_minima = [];
-SE = strel('disk', filter_size);
 % Identify the local extrema based on the specified method
+SE = strel('sphere', filter_size);
 switch regmax_method
     case 'raw'
-        regional_maxima = imregionalmax(projection, 8);
-        regional_minima = imregionalmin(projection, 8);
+        regional_maxima = imregionalmax(projection);
+        regional_minima = imregionalmin(projection);
     case 'filtered'
         projection_max_filtered = imdilate(projection, SE);
         projection_min_filtered = imerode(projection, SE);
-        regional_maxima = imregionalmax(projection_max_filtered, 8);
-        regional_minima = imregionalmin(projection_min_filtered, 8);
+        regional_maxima = imregionalmax(projection_max_filtered, 26);
+        regional_minima = imregionalmin(projection_min_filtered, 26);
     case 'both'
         projection_max_filtered = imdilate(projection, SE);
         projection_min_filtered = imerode(projection, SE);
-        regional_maxima = imregionalmax(projection, 8) | imregionalmax(projection_max_filtered, 8);
-        regional_minima = imregionalmin(projection, 8) | imregionalmin(projection_min_filtered, 8);
+        regional_maxima = imregionalmax(projection, 26) | imregionalmax(projection_max_filtered, 26);
+        regional_minima = imregionalmin(projection, 26) | imregionalmin(projection_min_filtered, 26);
 end%switch regmax_method
 end%FCN:identifyLocalExtrema
 
@@ -262,24 +287,23 @@ corr_img = zeros(size(projection));
 % --- Get number of pixels
 px_cnt = numel(corr_img);
 % --- Get a mask to identify neighbors
-nMask = [0 1 0; 1 0 1; 0 1 0];
+SE = strel('sphere', filter_size);
 % Iterate over all pixel
 parfor iPx = 1:px_cnt
     % Create mask  including all neighbors
     neighbors = zeros(size(projection));
     neighbors(iPx) = 1;
-    neighbors = conv2(neighbors, nMask, 'same')==1;
+    neighbors = imdilate(neighbors, SE) - neighbors;
     % Get neighbors' indices
-    [neighbors_ind_X, neighbors_ind_Y] = ind2sub(size(neighbors), find(neighbors));
-    [px_ind_X, px_ind_Y] = ind2sub(size(neighbors), iPx);
+    [neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z] = ind2sub(size(neighbors), find(neighbors));
+    [px_ind_X, px_ind_Y, px_ind_Z] = ind2sub(size(neighbors), iPx);
     % Get the correlation
-    neighbors_TC = squeeze(mean(mean(stack(neighbors_ind_X, neighbors_ind_Y,:))));
-    corr_img(iPx) = corr(neighbors_TC, squeeze(stack(px_ind_X, px_ind_Y, :)));
+    neighbors_TC = squeeze(mean(mean(mean(stack(neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z,:)))));
+    corr_img(iPx) = corr(neighbors_TC, squeeze(stack(px_ind_X, px_ind_Y, px_ind_Z, :)));
 end%iPx
 % Check whether to filter or not
 if strcmp(regmax_method, 'filtered')
-    SE = strel('disk', filter_size);
-    corr_img = imdilate(corr_img, SE);
+    corr_img = imdilate(corr_img, ones(3,3,3));
 end
 % Now, start with the best local correlation and gradually increase the
 % region until we reach a threshold of a correlation that got too worse
@@ -299,15 +323,17 @@ for iPx = 1:px_cnt
         while true
             % Get the current region's TC
             curr_TC = mean(reshaped_stack(find(pockets_labeled==cnt_id),:),1);
-            % Get the neighbors
-            neighbors = imgradient(pockets_labeled == cnt_id, 'central')>0;
-            [neighbors_ind_X, neighbors_ind_Y] = ind2sub(size(neighbors), find(neighbors));
+            % Create mask  including all neighbors
+            neighbors = pockets_labeled == cnt_id;
+            neighbors = imdilate(neighbors, SE) - neighbors;
+            % Get neighbors' indices
+            [neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z] = ind2sub(size(neighbors), find(neighbors));
             % Keep track of whether pixels got added
             added_px = zeros(1, length(neighbors_ind_X));
             % Check neighbors
             for iN = 1:length(neighbors_ind_X)
-                if (pockets_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN)) == 0) && (corr(curr_TC(:), squeeze(stack(neighbors_ind_X(iN), neighbors_ind_Y(iN),:))) >= sqrt(0.7))
-                    pockets_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN)) = cnt_id;
+                if (pockets_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN)) == 0) && (corr(curr_TC(:), squeeze(stack(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN),:))) >= sqrt(0.7))
+                    pockets_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN)) = cnt_id;
                     added_px(iN) = 1;
                 end%if valid addition
             end%iN
@@ -336,7 +362,7 @@ pockets_labeled = checkSplits(pockets_labeled);
 % pixel of the tiny region to the closest neighbor
 pockets_labeled = removeTinyRegions(pockets_labeled, minPixCount);
 % Get mask for neighbors
-nMask = [0 1 0; 1 0 1; 0 1 0];
+nMask = strel('sphere', 1);
 % Refine pockets
 hWait = waitbar(0, ['Refinig regions. Please wait ... (0/', num2str(n_rep),')']);
 for iRep = 1:n_rep
@@ -352,16 +378,15 @@ for iRep = 1:n_rep
     end%iPocket
     clear iC iR iPocket
     % Get pixels in border regions
-    candidates = imgradient(pockets_labeled, 'central')>0;
+    candidates = imgradient3(pockets_labeled, 'central')>0;
     idx_candidates = find(candidates);
-    idx_table = reshape(1:numel(pockets_labeled), size(pockets_labeled));
     % Iterate over all pixels in border regions and check
-    % whether thez have to be re-assigned.
+    % whether they have to be re-assigned.
     switch refinement_method
         case 'corr'
-            idx_candidates_newIdentiy = refinement_parfor_corr(idx_candidates, idx_table, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask);
+            idx_candidates_newIdentiy = refinement_parfor_corr(idx_candidates, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask);
         case 'rmse'
-            idx_candidates_newIdentiy = refinement_parfor_rmse(idx_candidates, idx_table, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask);
+            idx_candidates_newIdentiy = refinement_parfor_rmse(idx_candidates, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask);
     end
     % Update changed identities
     for iCan = 1:length(idx_candidates)
@@ -385,16 +410,20 @@ end%FCN:refineSegmentation
 
 
 
-function idx_candidates_newIdentiy = refinement_parfor_corr(idx_candidates, idx_table, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask)
+function idx_candidates_newIdentiy = refinement_parfor_corr(idx_candidates, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask)
 % Get current labels and prepare output of new labels
 idx_candidates_Identiy = pockets_labeled(idx_candidates);
 idx_candidates_newIdentiy = idx_candidates_Identiy;
 % Use a parallel for loop to speed things up
 parfor iCan = 1:length(idx_candidates)
-    % Get indices of neighbors
-    idx_neighbor = conv2( double(idx_table==idx_candidates(iCan)), nMask, 'same')==1;
+    % Create mask  including all neighbors
+    neighbors = zeros(size(pockets_labeled));
+    neighbors(idx_candidates(iCan)) = 1;
+    neighbors = imdilate(neighbors, nMask) - neighbors;
+    % Get neighbors' indices
+    [neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z] = ind2sub(size(neighbors), find(neighbors));
     % Get neighborhood clusters
-    nC = unique(pockets_labeled(idx_neighbor));
+    nC = unique(pockets_labeled(neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z));
     % Get the pixel's TC
     activity_px = reshaped_stack(idx_candidates(iCan), :);
     % Check which neighborhood is a better fit
@@ -411,16 +440,20 @@ end%FCN:refinement_parfor_corr
 
 
 
-function idx_candidates_newIdentiy = refinement_parfor_rmse(idx_candidates, idx_table, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask)
+function idx_candidates_newIdentiy = refinement_parfor_rmse(idx_candidates, pockets_labeled, reshaped_stack, pocketTC, pocketList, nMask)
 % Get current labels and prepare output of new labels
 idx_candidates_Identiy = pockets_labeled(idx_candidates);
 idx_candidates_newIdentiy = idx_candidates_Identiy;
 % Use a parallel for loop to speed things up
 parfor iCan = 1:length(idx_candidates)
-    % Get indices of neighbors
-    idx_neighbor = conv2( double(idx_table==idx_candidates(iCan)), nMask, 'same')==1;
+    % Create mask  including all neighbors
+    neighbors = zeros(size(pockets_labeled));
+    neighbors(idx_candidates(iCan)) = 1;
+    neighbors = imdilate(neighbors, nMask) - neighbors;
+    % Get neighbors' indices
+    [neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z] = ind2sub(size(neighbors), find(neighbors));
     % Get neighborhood clusters
-    nC = unique(pockets_labeled(idx_neighbor));
+    nC = unique(pockets_labeled(neighbors_ind_X, neighbors_ind_Y, neighbors_ind_Z));
     % Get the pixel's TC
     activity_px = reshaped_stack(idx_candidates(iCan), :);
     % Check which neighborhood is a better fit
@@ -442,11 +475,13 @@ function pockets_labeled = checkSplits(pockets_labeled)
 % all pocket and check whether the corresponding itentity
 % can be found in more then one coherent regions
 unique_pockets = unique(pockets_labeled(:));
+% Get a mask to identify neighbors
+SE = strel('sphere', 1);
 for iPocket = 1:length(unique_pockets)
     % Neglect identity of zero
     % Get b/w image and identify number of regions
     bw = pockets_labeled==unique_pockets(iPocket);
-    L = bwlabel(bw,4);
+    L = bwlabeln(bw, 26);
     % If there is more than one region (i.e. more than
     % the labels 0 and 1, assign new identities
     unique_L = unique(L(:));
@@ -456,11 +491,12 @@ for iPocket = 1:length(unique_pockets)
             idx = find(L == unique_L(iSplitter));
             % If the new region is just a single pixel, do not make it
             % a new region
-            if length(idx)==1               
-                % Get pixels on the edge
-                neighbors = imgradient(L == unique_L(iSplitter), 'central')>0;
-                neighbors(bw) = 0;
-                neighbor_IDs = unique(pockets_labeled(neighbors));
+            if length(idx)==1
+                % Create mask  including all neighbors
+                neighbors = L == unique_L(iSplitter);
+                neighbors = imdilate(neighbors, SE) - neighbors;
+                % Get IDs on the edge
+                neighbor_IDs = unique(pockets_labeled(find(neighbors)));
                 pockets_labeled(idx) = mode(neighbor_IDs(:));
             else
                 pockets_labeled(idx) = max(unique_pockets)+1;
@@ -478,6 +514,8 @@ function pockets_labeled = removeTinyRegions(pockets_labeled, minPixCount)
 % over all pockets, and check whether it is large enough. If
 % not, assign each pixel to the best neigbour.
 % Repeat as long as all small pockets are gone.
+% --- Get a mask to identify neighbors
+SE = strel('sphere', 1);
 while true
     % Get pixel count for each region
     pocketList = unique(pockets_labeled);
@@ -496,26 +534,26 @@ while true
                 bw = pockets_labeled==curr_ID;
                 % If it is a single pixel, use the mode. Otherwise the closest
                 % value that is not the current ID
-                [x, y] = ind2sub(size(bw), find(bw));
-                % Get pixels on the edge
-                neighbors = imgradient(bw, 'central')>0;
-                neighbors(bw) = 0;
-                neighbor_IDs = unique(pockets_labeled(neighbors));
+                [x, y, z] = ind2sub(size(bw), find(bw));
+                % Create mask  including all neighbors
+                neighbors = imdilate(bw, SE) - bw;
+                % Get IDs on the edge
+                neighbor_IDs = unique(pockets_labeled(find(neighbors)));
                 if C(iPocket,1) == 1
-                    pockets_labeled(x, y) = mode(neighbor_IDs(:));
+                    pockets_labeled(x, y, z) = mode(neighbor_IDs(:));
                 else
                     % Iterate over all pixels of the region that is too small and
                     % assign them to the closest neighbor region
                     for iPx = 1:length(x)
                         id_table = nan(1, length(neighbor_IDs));
                         for iN = 1:length(neighbor_IDs)
-                            [Nx, Ny] = ind2sub(size(bw), find(pockets_labeled==neighbor_IDs(iN)));
-                            dist = [Nx(:), Ny(:)] - [x(iPx), y(iPx)];
+                            [Nx, Ny, Nz] = ind2sub(size(bw), find(pockets_labeled==neighbor_IDs(iN)));
+                            dist = [Nx(:), Ny(:), Nz(:)] - [x(iPx), y(iPx), z(iPx)];
                             min_dist = min(sqrt(sum(dist'.*dist'))');
                             id_table(iN) = min_dist;
                         end%iN
                         [~,best_id] = min(id_table);
-                        pockets_labeled(x(iPx), y(iPx)) = neighbor_IDs(best_id);
+                        pockets_labeled(x(iPx), y(iPx), z(iPx)) = neighbor_IDs(best_id);
                     end%iPx
                 end% if single pixel
             else
