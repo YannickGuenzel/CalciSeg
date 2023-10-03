@@ -52,5 +52,9 @@ Both functions return two variables:
 - pockets_labeled : resulting segmentation. An ID was assigned to each pixel.
 - summary_stats : summarizing statisitcs.
 
+Cite
+----
+If you use **CalciSeg**, please cite it using this DOI:
+[![DOI]( *coming soon* )
 
 Thank you for using **CalciSeg**!
