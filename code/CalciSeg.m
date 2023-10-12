@@ -9,9 +9,12 @@ function [pockets_labeled, summary_stats] = CalciSeg(stack, projection_method, i
 % Input:
 %       stack             : 3-D matrix (x*y*time)
 %       projection_method : method for calculating the projection across time
-%                             - 'std'  - standard deviation projection
-%                             - 'mean' - mean projection
-%                             - 'max'  - max projection
+%                             - 'std'    - standard deviation projection
+%                             - 'mean'   - mean intensity projection
+%                             - 'median' - median intensity projection
+%                             - 'max'    - maximum intensity projection
+%                             - 'min'    - minimum intensity projection
+%                             - 'pca'    - principal component projection
 %       init_seg_method   : method for initial segmentation
 %                             - 'voronoi' - Delaunay triangulation
 %                             - 'corr'    - local growing based on correlation (r_threshold = sqrt(0.7))
@@ -99,7 +102,7 @@ if ndims(stack) ~= 3
 end%if invalid 'stack' input
 
 % Validate 'projection_method' input
-valid_projection_methods = {'std', 'mean', 'max', 'none'};
+valid_projection_methods = {'std', 'mean', 'median', 'max', 'min', 'pca', 'none'};
 if ~ismember(projection_method, valid_projection_methods)
     valid = -1;
     error_message = [error_message, sprintf('Invalid "projection_method". Valid options are: %s.', strjoin(valid_projection_methods, ', '))];
@@ -159,7 +162,7 @@ if t == 1
 end%if no temporal component
 
 % Reshape the stack to a 2D matrix for further processing
-reshaped_stack = reshape(stack, x*y, t);
+reshaped_stack = reshape(stack, [x*y, t]);
 
 % Initialize the projection variable
 projection = [];
@@ -170,8 +173,17 @@ switch projection_method
         projection = nanstd(stack, [], 3);
     case 'mean'
         projection = nanmean(stack, 3);
+    case 'median'
+        projection = nanmedian(stack, 3);
     case 'max'
         projection = nanmax(stack, [], 3);
+    case 'min'
+        projection = nanmin(stack, [], 3);
+    case 'pca'
+        [~, projection, ~, ~, explained] = pca(reshaped_stack, 'NumComponents',1);
+        projection = reshape(projection, [x, y]);
+        disp(['Explained variance: ', num2str(round(explained(1),2)), '%'])
+        clear explained
     case 'none'
         projection = stack;
 end%switch projection method
