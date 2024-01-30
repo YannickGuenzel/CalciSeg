@@ -31,9 +31,12 @@ For **CalciSeg**, use the following input:
 CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 - stack : 3-D matrix (x*y*time)
 - projection_method : method for calculating the projection across time
-	- 'std'      - standard deviation projection
-	- 'mean'     - mean projection
-	- 'max'      - max projection
+	- 'std'    - standard deviation projection
+	- 'mean'   - mean intensity projection
+	- 'median' - median intensity projection
+	- 'max'    - maximum intensity projection
+	- 'min'    - minimum intensity projection
+	- 'pca'    - principal component projection
 - init_seg_method : method for initial segmentation
 	- 'voronoi'  - Delaunay triangulation
 	- 'corr'     - local growing based on correlation (r_threshold = sqrt(0.7))
