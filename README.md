@@ -29,30 +29,35 @@ Both **CalciSeg** and **CalciSeg_3D** are MATLAB functions that can be called fr
 For **CalciSeg**, use the following input:
 
 CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-- stack : 3-D matrix (x*y*time)
+- stack             : 3-D matrix (x*y*time).
 - projection_method : method for calculating the projection across time
-	- 'std'    - standard deviation projection
-	- 'mean'   - mean intensity projection
-	- 'median' - median intensity projection
-	- 'max'    - maximum intensity projection
-	- 'min'    - minimum intensity projection
-	- 'pca'    - principal component projection
-- init_seg_method : method for initial segmentation
-	- 'voronoi'  - Delaunay triangulation
-	- 'corr'     - local growing based on correlation (r_threshold = sqrt(0.7))
-- regmax_method : method for determining how to identify local extrema                          
-	- 'raw'      - simply apply imregionalmax/-min on the projection
-	- 'filtered' - dilate/erode image to apply moving max/min filter before applying imregionalmax/-min                                           
-	- 'both'     - combine both above-mentioned methods
-- n_rep : Number of iterations for refining the regions.
+                     - 'std'    - standard deviation projection
+                     - 'mean'   - mean intensity projection
+                     - 'median' - median intensity projection
+                     - 'max'    - maximum intensity projection
+                     - 'min'    - minimum intensity projection
+                     - 'pca'    - principal component projection
+                     - 'corr'   - local correlation between neighboring pixels
+					 
+- init_seg_method   : method for initial segmentation
+                     - 'voronoi'  - Delaunay triangulation
+                     - 'corr'     - local growing based on correlation (r_threshold = sqrt(0.85))
+					 
+- regmax_method     : method for determining how to identify local extrema
+                     - 'raw'      - simply apply imregionalmax/-min on the projection
+                     - 'filtered' - dilate/erode image to apply moving
+                                    max/min filter before applying imregionalmax/-min
+                     - 'both'     - combine both above-mentioned methods
+
+- n_rep             : Number of iterations for refining the regions.
 - refinement_method : Measure to fine-tune granule assignment
-	- 'corr' - correlation
-	- 'rmse'  - root median square error
-- minPixCount : Minimum pixel area. Use 'auto' for an automatic assessment. Or provide a number, *e.g.*, minPixCount=10 for at least 10 pixels per region.
+                     - 'corr'     - correlation
+                     - 'rmse'     - root median square error
+- limitPixCount     : Minimum and maximum pixel area. Use 'auto' for anautomatic assessment based on the distribution ofregion sizes before refined segmentation (min=5thquantile; max=95thquantile). Or provide atwo-element vectorlimitPixCount=[min, max]. Notethat, if not set to 'auto', the min region sizeaffects the filter size for regmax_method. If setto auto, the size is set to 1.
 
-For **CalciSeg_3D**, the input remains similar. Note the additional parameter *aspect_ratio* to account for differences in x-y-z dimensions. Further, the input *stack* is now expected to a 4-D matrix (x*y*z-time).
+For **CalciSeg_3D**, the input remains similar. Note the additional parameter *aspect_ratio* to account for differences in x-y-z dimensions. Further, the input *stack* is now expected to a 4-D matrix (x*y*z-time) and there is only an option for a minimum region size.
 
-CalciSeg(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
+CalciSeg_3D(stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
 
 Both functions return two variables:
 - pockets_labeled : resulting segmentation. An ID was assigned to each pixel.
