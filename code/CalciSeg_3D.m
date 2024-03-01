@@ -1,110 +1,175 @@
-function [granules_labeled, summary_stats] = CalciSeg_3D(stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-% CalciSeg_3D(stack, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-% segments the spatial aspects of a stack (x*y*z*time) into individual
+function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
+% [granules_labeled, summary_stats] = CalciSeg_3D(stack, Name, Value)
+% segments the spatial aspects of a 4-D stack (x*y*z*time) into individual
 % regions ('granules') based on a refined 3D Delaunay triangulation.
 % Note: CalciSeg uses parallel for-loops at for the local growing
 % algorithm and the refinement process. It is recommended to start a
 % parallel pool of workers before calling the function.
 %
-% Input:
-%   stack             : 4-D matrix (x*y*z*time).
-%   aspect_ratio      : x-y-z aspect ratio (e.g., [1 1 1])
-%   projection_method : method for calculating the projection across time
-%                       - 'std'    - standard deviation projection
-%                       - 'mean'   - mean intensity projection
-%                       - 'median' - median intensity projection
-%                       - 'max'    - maximum intensity projection
-%                       - 'min'    - minimum intensity projection
-%                       - 'pca'    - principal component projection
-%                       - 'corr'   - local correlation between neighboring
-%                                    pixels
 %
-%   init_seg_method   : method for initial segmentation
-%                       - 'voronoi'  - Delaunay triangulation
-%                       - 'corr'     - local growing based on correlation (r_threshold = sqrt(0.85))
+% OPTIONAL INPUT PARAMETERS:
+% Parameter name        Values and description
+% =========================================================================
 %
-%   regmax_method     : method for determining how to identify local extrema
-%                       - 'raw'      - simply apply imregionalmax/-min on
-%                                      the projection
-%                       - 'filtered' - dilate/erode image to apply moving
+% 'aspect_ratio'        Aspect ratio of the the data (x, y, z)
+% (array)               Default: [1 1 1]
+%
+% 'projection_method'   Method for calculating the projection
+% (string)              across time.
+%                       Default: 'std'
+%                       - 'std'    : Standard deviation projection
+%                       - 'mean'   : Mean intensity projection
+%                       - 'median' : Median intensity projection
+%                       - 'max'    : Maximum intensity projection
+%                       - 'min'    : Minimum intensity projection
+%                       - 'pca'    : Principal component projection. For
+%                                    this, "stack" is projected into PC 
+%                                    space.
+%                       - 'corr'   : Correlation space as local correlation
+%                                    between  neighboring pixels
+%                       - 'none'   : Applicable when "stack" has no fourth 
+%                                    dimension or when to take the first 
+%                                    slice of the 4-D stack
+%
+% 'init_seg_method'    Method for the initial segmentation.
+% (string)             Default: 'voronoi'
+%                       - 'voronoi' : Delaunay triangulation
+%                       - 'corr'    : Local growing based on correlation.
+%                                   : This will set 'projection_method' to
+%                                     be 'corr'
+%                       - 'rICA'    : Reconstruction independent component 
+%                                     analysis.
+%
+% 'regmax_method'       Method for determining how to identify local
+% (string)              extrema in the intensity projection.
+%                       Default: 'raw'
+%                       - 'raw'      : Simply apply imregionalmax/-min on
+%                                      the projection. 
+%                       - 'filtered' : Dilate/erode image to apply moving
 %                                      max/min filter before applying
-%                                      imregionalmax/-min
-%                       - 'both'     - combine both above-mentioned methods
+%                                      imregionalmax/-min. Note, this
+%                                      will also smooth the correlation 
+%                                      space when init_seg_method is set to
+%                                      be 'corr', or the independent
+%                                      components accordingly when it is 
+%                                      set to be 'rICA'.
+%                       - 'both'     : Combine both above-mentioned
+%                                      methods. Note, this is only
+%                                      applicable when init_seg_method is
+%                                      set to be 'voronoi'. 
 %
-%   n_rep             : Number of iterations for refining the regions.
-%   refinement_method : Measure to fine-tune granule assignment
-%                       - 'corr'     - correlation
-%                       - 'rmse'     - root median square error
-%   minPixCount       : Minimum pixel area. Use 'auto' for an
-%                       automatic assessment based on the distribution of
-%                       region sizes before refined segmentation (min=5th
-%                       quantile). Or provide a single number. Note
-%                       that, if not set to 'auto', the min region size
-%                       affects the filter size for regmax_method. If set
-%                       to auto, the size is set to 1.
+% 'n_rep'               Number of iterations for refining the regions.
+% (integer)             Default: 0
+%
+% 'refinement_method'   Measure to fine-tune granule assignment during 
+% (string)              refinement iterations.
+%                       Default: 'rmse'
+%                       - 'rmse' : Root median square error
+%                       - 'corr' : Pearson  correlation coefficient
+%                       
+% 'minPixCount'     :   Limits the pixel area per granule
+% (matrix or string)    Default:  1
+%                       - [a]    : The minimum (a) number of pixels that 
+%                                  can be assigned to a  granule. Note 
+%                                  that, it affects the filter size for the 
+%                                  regmax_method input.
+%                       - 'auto' : An automatic assessment based on the 
+%                                  distribution of granule sizes before
+%                                  refinement. Here, a is set to be the
+%                                  5th quantile and b to be the 95th
+%                                  quntile. The filter size for    
+%                                  regmax_method is set to 1.
+%
+% 'corr_thresh'       : Threshold for the Pearson correlation coefficient
+% (number)              when refinement_method is set to be 'corr'.
+%                       Default: 0.85
+%
+% 'n_rICA'            : Number of features to extract during reconstruction 
+% (integer)             independent component analysis.
+%                       Default: 0 to use the full number of components.
+%                       Otherwise provide a number larger than zero for
+%                       either an undercomplete (n_rICA < number of frames)
+%                       or overcomplete (n_rICA > number of frames) feature 
+%                       representations.
 %
 %
-% Output:
-%   granules_labeled : granule labels
-%   summary_stats    : avg, std, corr for each granule
-%                      .projection           : projection image used for initial segmentation
-%                      .avgTCs               : each granule's mean time course
-%                      .granule_Corr         : avg within-granule correlation
-%                      .granule_Avg_img      : within-granule average activity
-%                      .granule_Std_img      : each granule's std over time
-%                      .granule_Max_img      : each granule's max over time
-%                      .granule_Corr_img     : within-granule correlation
-%                      .active_region.map    : binary map of active regions
-%                      .active_region.method : method used for binarizing
+% OUTPUT
+% Parameter name      Values and description
+% =========================================================================
 %
-% Version: 17-Jan-24 (R2023a)
+% granules_labeled    : Map with granule IDs. The size of granules_labeled
+%                       corresponds to the first two dimensions of stack.
+%
+% summary_stats       : Summary statistics for each granule and additional
+%                       inforamtion on the segmentation process saved as
+%                       structures.
+%                      - projection           : Projection image used for
+%                                               initial segmentation.
+%                      - avgTCs               : Each granule's mean time 
+%                                               course
+%                      - granule_Corr         : Average within-granule 
+%                                               correlation
+%                      - granule_Avg_img      : Within-granule average 
+%                                               activity
+%                      - granule_Std_img      : Each granule's standard  
+%                                               deviation over time
+%                      - granule_Max_img      : Each granule's maximum 
+%                                               value over time
+%                      - granule_Min_img      : Each granule's minimum
+%                                               value over time
+%                      - granule_Corr_img     : Within-granule correlation
+%                      - active_region.map    : Binary map of active 
+%                                               regions based on Otsu's
+%                                               method
+%                      - active_region.method : Method used for binarizing
+%
+%
+% Version: 29-Feb-24 (R2023a)
+% =========================================================================
 
 % Validate inputs
 stack = squeeze(stack);
+opt = validateInputs(stack, varargin);
+
+% Reduce precision of stack to be single
 stack_size = whos('stack');
 if ~strcmp(stack_size.class, 'single')
     stack = single(stack);
 end%if not single precision
-error_message = '';
-[valid, error_message] = validateInputs(error_message, stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount);
-if valid == -1
-    error(error_message);
-elseif valid == 0
-    warning(error_message);
-end
 
 % Define size for local neighborhood
-if isnumeric(minPixCount)
-    filter_size = ceil(sqrt(minPixCount(1)/pi)) + double(minPixCount(1)==0);
-elseif strcmp(minPixCount, 'auto')
-    filter_size = 1;
+if isnumeric(opt.minPixCount)
+    opt.filter_size = ceil(sqrt(opt.minPixCount(1)/pi)) + double(opt.minPixCount(1)==0);
+elseif strcmp(opt.minPixCount, 'auto')
+    opt.filter_size = 1;
 end
 
 % Initial preprocessing
-[reshaped_stack, projection, refinement_method, init_segment_method] = initialPreprocessing(stack, projection_method, refinement_method, init_segment_method, filter_size);
+[reshaped_stack, projection] = initialPreprocessing(stack, opt);
 
 % Perform initial segmentation
-granules_labeled = initialSegmentation(stack, aspect_ratio, reshaped_stack, projection, regmax_method, init_segment_method, filter_size, minPixCount);
+granules_labeled = initialSegmentation(stack, reshaped_stack, projection, opt);
 
 % Maybe, the user wants to have the min/max size estimated based on the data
-if (isstring(minPixCount) || ischar(minPixCount)) && strcmp(minPixCount, 'auto')
+if (isstring(opt.minPixCount) || ischar(opt.minPixCount)) && strcmp(opt.minPixCount, 'auto')
     % Get pixel count for each region
     granuleList = unique(granules_labeled);
     [~,~,C] = unique(granules_labeled);
     C = histcounts(C, 1:length(granuleList)+1);
     C = [C(:), granuleList(:)];
-    minPixCount = floor(quantile(C(2:end,1), 0.05));
-    disp(['automatic assessment of the min. granule size: ', num2str(minPixCount)])
+    opt.minPixCount = floor(quantile(C(2:end,1), 0.05));
+    disp(['automatic assessment of the min. granule size: ', num2str(opt.minPixCount)])
 end%if auto min size
 
 % Refine segmentation
-if n_rep>0
-    granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, n_rep, refinement_method, minPixCount);
+granules_labeled = removeTinyRegions(granules_labeled, opt);
+if opt.n_rep>0
+    granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, opt);
 end%if refine
 
 % Final refinement steps and statistics calculation
 if nargout>1
-    [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, projection_method);
+    [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, opt);
     summary_stats.projection = projection;
 end%if summary stats
 
@@ -112,94 +177,135 @@ end%FCN:CalciSeg_3D
 
 % -------------------------------------------------------------------------
 
-function [valid, error_message] = validateInputs(error_message, stack, aspect_ratio, projection_method, init_segment_method, regmax_method, n_rep, refinement_method, minPixCount)
-% Initialize output variables
-valid = 1;
+function opt = validateInputs(stack, varargin)
+% First, set all parameters to their default value
+opt.aspect_ratio = [1 1 1];
+opt.projection_method = 'std';
+opt.init_seg_method = 'voronoi';
+opt.regmax_method = 'raw';
+opt.n_rep = 0;
+opt.refinement_method = 'rmse';
+opt.minPixCount = 1;
+opt.corr_thresh = 0.85;
+opt.n_rICA = 0;
 
-% Validate 'stack' input
-if ndims(stack) ~= 4
-    valid = 0;
-    error_message = 'Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_segment_method="voronoi"; refinement_method="rmse"). ';
+% Now, check optional input variable
+varargin = varargin{1};
+if ~isempty(varargin)
+    if mod(length(varargin),2)>0
+        error('Wrong number of arguments.')
+    else
+        % Iterate over all inuput arguments
+        for iArg = 1:2:length(varargin)
+            switch varargin{iArg}
+                % Aspect ratio ------------------------------------------------
+                case 'aspect_ratio'
+                    if ~isnumeric(varargin{iArg+1}) || length(varargin{iArg+1}) ~= 3 || isempty(varargin{iArg+1}) || any(varargin{iArg+1}<=0)
+                        error('Input "aspect_ratio" has to be a vector of positive values with a length of 3.');
+                    else
+                        opt.aspect_ratio = varargin{iArg+1};
+                    end
+                % Projection method -------------------------------------------
+                case 'projection_method'
+                    valid_projection_methods = {'std', 'mean', 'median', 'max', 'min', 'pca', 'corr', 'none'};
+                    if ~ismember(varargin{iArg+1}, valid_projection_methods)
+                        error('Invalid "projection_method". Valid options are: %s.', strjoin(valid_projection_methods, ', '));
+                    else
+                        opt.projection_method = varargin{iArg+1};
+                    end
+                % Initial segmentation method ---------------------------------
+                case 'init_seg_method'
+                    valid_init_seg_methods = {'voronoi', 'corr', 'rICA'};
+                    if ~ismember(varargin{iArg+1}, valid_init_seg_methods)
+                        error(sprintf('Invalid "projection_method". Valid options are: %s.', strjoin(valid_projection_methods, ', ')));
+                    else
+                        opt.init_seg_method = varargin{iArg+1};
+                    end
+                    % Method for smoothing regional maxima ------------------------
+                case 'regmax_method'
+                    valid_regmax_methods = {'raw', 'filtered', 'both'};
+                    if ~ismember(varargin{iArg+1}, valid_regmax_methods)
+                        error('Invalid "regmax_method". Valid options are: %s.', strjoin(valid_regmax_methods, ', '));
+                    else
+                        opt.regmax_method = varargin{iArg+1};
+                    end
+                    % Number of refinement interations ----------------------------
+                case 'n_rep'
+                    if ~isnumeric(varargin{iArg+1}) || varargin{iArg+1} < 0
+                        error('Input "n_rep" must be a non-negative integer value.');
+                    else
+                        opt.n_rep = varargin{iArg+1};
+                    end
+                    % Distance metric during refinement ---------------------------
+                case 'refinement_method'
+                    valid_refinement_methods = {'corr', 'rmse'};
+                    if ~ismember(varargin{iArg+1}, valid_refinement_methods)
+                        error('Invalid "refinement_method". Valid options are: %s.', strjoin(valid_refinement_methods, ', '));
+                    else
+                        opt.refinement_method = varargin{iArg+1};
+                    end
+                    % Minimum and maximum number of pixels per region -------------
+                case 'minPixCount'
+                    if ~isnumeric(varargin{iArg+1}) && ~strcmp(varargin{iArg+1}, 'auto')
+                        error( 'Input "minPixCount" must be a non-negative pair of two integer values or "auto".');
+                    elseif isnumeric(varargin{iArg+1}) && length(varargin{iArg+1}) ~= 2
+                        error('Input "minPixCount" must be a non-negative pair of two integer values or "auto".');
+                    else
+                        opt.minPixCount = varargin{iArg+1};
+                    end
+                    % Correlation threshold ---------------------------------------
+                case 'corr_thresh'
+                    if ~isnumeric(varargin{iArg+1}) || varargin{iArg+1} < 0 || varargin{iArg+1} > 1
+                        error('Input "corr_thresh" must be a number between 0 and 1.');
+                    else
+                        opt.corr_thresh = varargin{iArg+1};
+                    end
+                    % Number of independent components ----------------------------
+                case 'n_rICA'
+                    if ~isnumeric(varargin{iArg+1}) || varargin{iArg+1} < 0
+                        error('Input "n_rICA" must be an integer larger than 0.');
+                    else
+                        opt.n_rICA = round(varargin{iArg+1});
+                    end
+                otherwise
+                    error(['Unknown argument "',varargin{iArg},'"'])
+            end%switch
+        end%iArg
+    end%if mod
+end%if custom arguments
+
+% Last, validate 'stack' input and potentially adjust some input parameters
+if ndims(stack) < 2
+    error('Input "stack" has to be at least a 2-D (x,y) matrix.')
+elseif ndims(stack) > 3
+    error('Number of dimension of the input "stack" cannot exceed 4.')
+elseif ismatrix(stack)
+    warning('Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_segment_method="voronoi"; refinement_method="rmse").');
+    opt.projection_method = 'none';
+    opt.init_seg_method = 'voronoi';
+    opt.refinement_method = 'rmse';
 end%if invalid 'stack' input
-
-% Validate 'aspect_ratio' input
-if ~isnumeric(aspect_ratio) || length(aspect_ratio) ~= 3 || isempty(aspect_ratio) || any(aspect_ratio<=0)
-    valid = -1;
-    error_message = [error_message, 'Input "aspect_ratio" has to be a vector of positive values with a length of 3.'];
-end%if invalid 'stack' input
-
-% Validate 'projection_method' input
-valid_projection_methods = {'std', 'mean', 'median', 'max', 'min', 'pca', 'corr', 'none'};
-if ~ismember(projection_method, valid_projection_methods)
-    valid = -1;
-    error_message = [error_message, sprintf('Invalid "projection_method". Valid options are: %s.', strjoin(valid_projection_methods, ', '))];
-    return;
-end%if invalid 'projection_method' input
-
-% Validate 'projection_method' input
-valid_init_segment_methods = {'voronoi', 'corr'};
-if ~ismember(init_segment_method, valid_init_segment_methods)
-    valid = -1;
-    error_message = [error_message, sprintf('Invalid "init_segment_method". Valid options are: %s.', strjoin(valid_init_segment_methods, ', '))];
-    return;
-end%if invalid 'projection_method' input
-
-% Validate 'regmax_method' input
-valid_regmax_methods = {'raw', 'filtered', 'both'};
-if ~ismember(regmax_method, valid_regmax_methods)
-    valid = -1;
-    error_message = [error_message, sprintf('Invalid "regmax_method". Valid options are: %s.', strjoin(valid_regmax_methods, ', '))];
-    return;
-end%if invalid 'regmax_method' input
-
-% Validate 'n_rep' input
-if ~isnumeric(n_rep) || n_rep < 0
-    valid = -1;
-    error_message = [error_message, 'Input "n_rep" must be a non-negative integer value.'];
-    return;
-end%if invalid 'n_rep' input
-
-% Validate 'refinement_method' input
-valid_refinement_methods = {'corr', 'rmse'};
-if ~ismember(refinement_method, valid_refinement_methods)
-    valid = -1;
-    error_message = [error_message, sprintf('Invalid "refinement_method". Valid options are: %s.', strjoin(valid_refinement_methods, ', '))];
-    return;
-end%if invalid 'refinement_method' input
-
-% Validate 'minPixCount' input
-if ~isnumeric(minPixCount) && ~strcmp(minPixCount, 'auto')
-    valid = -1;
-    error_message = [error_message, 'Input "minPixCount" must be a non-negative integer value or "auto".'];
-    return;
-elseif isnumeric(minPixCount) && length(minPixCount) ~= 1
-    valid = -1;
-    error_message = [error_message, 'Input "minPixCount" must be a non-negative integer value or "auto".'];
-    return;
-end%if invalid 'minPixCount' input
+% For the region-growing approach, both projection_method and
+% opt.init_seg_method must be set to 'corr'
+if strcmp(opt.init_seg_method, 'corr')
+    if ~strcmp(opt.projection_method, 'corr')
+        warning('When the input "init_seg_method" is set to "corr", the input "projection_method" must be set to "corr" as well. We fixed this.')
+        opt.projection_method = 'corr';
+    end%if
+end%if
 end%FCN:validateInputs
 
 % -------------------------------------------------------------------------
 
-function [reshaped_stack, projection, refinement_method, init_segment_method] = initialPreprocessing(stack, projection_method, refinement_method, init_segment_method, filter_size)
+function [reshaped_stack, projection] = initialPreprocessing(stack, opt)
 % Get the size of the stack
 [x, y, z, t] = size(stack);
-
-% Check the time dimension and adjust parameters accordingly
-if t == 1
-    projection_method = 'none';
-    refinement_method = 'rmse';
-    init_segment_method = 'voronoi';
-end%if no temporal component
-
-% Reshape the stack to a 2D matrix for further processing
-reshaped_stack = reshape(stack, [x*y*z, t]);
 
 % Initialize the projection variable
 projection = [];
 
 % Calculate the projection based on the specified method
-switch projection_method
+switch opt.projection_method
     case 'std'
         projection = nanstd(stack, [], 4);
     case 'mean'
@@ -211,35 +317,43 @@ switch projection_method
     case 'min'
         projection = nanmin(stack, [], 4);
     case 'pca'
-        [~, projection, ~, ~, explained] = pca(reshaped_stack, 'NumComponents',1);
-        projection = reshape(projection, [x, y, z]);
-        disp(['Explained variance: ', num2str(round(explained(1),2)), '%'])
-        clear explained
+        [~, stack, ~, ~, explained] = pca(reshape(stack, [x*y*z, t]));
+        if ~isempty(find(cumsum(explained)>=99.99,1))
+            t = find(cumsum(explained)>=99.99,1);
+        end%if
+        stack = reshape(stack(:,1:t), [x, y, z, t]);
+        projection = squeeze(stack(:,:,:,1));
+        disp(['PC1 | Explained variance: ', num2str(round(explained(1),2)), '%'])       
     case 'corr'
-        projection = correlationImage(stack, filter_size);
+        projection = correlationImage(stack, opt.filter_size);
     case 'none'
-        projection = stack;
+        projection = squeeze(stack(:,:,:,1));
 end%switch projection method
+
+% Reshape the stack to a 2D matrix for further processing
+reshaped_stack = reshape(stack, [x*y, t]);
 
 end%FCN:initialPreprocessing
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = initialSegmentation(stack, aspect_ratio, reshaped_stack, projection, regmax_method, init_segment_method, filter_size, minPixCount)
-switch init_segment_method
+function granules_labeled = initialSegmentation(stack, reshaped_stack, projection, opt)
+switch opt.init_segment_method
     case 'voronoi'
         % Get local maxima and minima
-        [regional_maxima, regional_minima] = identifyLocalExtrema(projection, regmax_method, filter_size);
+        [regional_maxima, regional_minima] = identifyLocalExtrema(projection, opt);
         % 2-D Delaunay triangulation
-        granules_labeled = triang_extrema(regional_maxima, regional_minima, aspect_ratio);
+        granules_labeled = triang_extrema(regional_maxima, regional_minima, opt);
     case 'corr'
-        granules_labeled = growing_regions(stack, projection, reshaped_stack, minPixCount);
-end%switch init_segment_method
+        granules_labeled = growing_regions(stack, projection, reshaped_stack, opt);
+    case 'rICA'
+        granules_labeled = rICA_segmentation(projection, reshaped_stack, opt);
+end%switch opt.init_segment_method
 end%FCN:initialSegmentation
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = triang_extrema(regional_maxima, regional_minima, aspect_ratio)
+function granules_labeled = triang_extrema(regional_maxima, regional_minima, opt)
 % Erode the extrema location to keep the controids only
 ultimateErosion = bwulterode((double(regional_maxima) + double(regional_minima)), 26);
 % Reduce to single voxels
@@ -281,7 +395,7 @@ linearIndices = 1:numel(regional_maxima);
 allVoxels = [x(:), y(:), z(:)];
 clear x y z linearIndices
 % Use knnsearch to find the index of the closest point in 'C' for each voxel
-granules_labeled = knnsearch(C.*aspect_ratio, allVoxels.*aspect_ratio);
+granules_labeled = knnsearch(C.*opt.aspect_ratio, allVoxels.*opt.aspect_ratio);
 % Reshape the resulting index array to the dimensions of the 3D volume
 granules_labeled = reshape(granules_labeled, size(regional_maxima));
 % Remove border
@@ -295,13 +409,13 @@ end%FCN:triang_extrema
 
 % -------------------------------------------------------------------------
 
-function [regional_maxima, regional_minima] = identifyLocalExtrema(projection, regmax_method, filter_size)
+function [regional_maxima, regional_minima] = identifyLocalExtrema(projection, opt)
 % Initialize the output variables
 regional_maxima = [];
 regional_minima = [];
 % Identify the local extrema based on the specified method
-SE = strel('sphere', filter_size);
-switch regmax_method
+SE = strel('sphere', opt.filter_size);
+switch opt.regmax_method
     case 'raw'
         regional_maxima = imregionalmax(projection);
         regional_minima = imregionalmin(projection);
@@ -315,19 +429,19 @@ switch regmax_method
         projection_min_filtered = imerode(projection, SE);
         regional_maxima = imregionalmax(projection, 26) | imregionalmax(projection_max_filtered, 26);
         regional_minima = imregionalmin(projection, 26) | imregionalmin(projection_min_filtered, 26);
-end%switch regmax_method
+end%switch opt.regmax_method
 end%FCN:identifyLocalExtrema
 
 % -------------------------------------------------------------------------
 
-function projection = correlationImage(stack, filter_size)
+function projection = correlationImage(stack, opt)
 % --- Preallocation
 corr_img = zeros(size(stack,1), size(stack,2), size(stack,3));
 projection = corr_img;
 % --- Get number of pixels
 px_cnt = numel(corr_img);
 % --- Get a mask to identify neighbors
-SE = strel('sphere', filter_size);
+SE = strel('sphere', opt.filter_size);
 % Iterate over all pixel
 parfor iPx = 1:px_cnt
     % Create mask  including all neighbors
@@ -346,10 +460,10 @@ end%FCN:correlationImage
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = growing_regions(stack, corr_img, reshaped_stack, minPixCount)
+function granules_labeled = growing_regions(stack, corr_img, reshaped_stack, opt)
 % Check whether there is an upper limit to the region size
-if isnumeric(minPixCount)
-    max_size = minPixCount(2);
+if isnumeric(opt.minPixCount)
+    max_size = opt.minPixCount(2);
 else
     max_size = 1;
 end
@@ -400,14 +514,59 @@ end%FCN:growing_regions
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, n_rep, refinement_method, minPixCount)
-% Account for regions that are too small
-granules_labeled = removeTinyRegions(granules_labeled, minPixCount);
+function granules_labeled = rICA_segmentation(projection, reshaped_stack, opt)
+% Employ a reconstruction independent component analysis (rICA) to extract
+% features that can be turned into individual regions. For this, determine
+% the component with the strongest effec on a given pixel.
+% Get size of the dataset
+[x, y, z] = size(projection);
+% Subtract mean since ICA cannot separate sources with a mean signal
+% effect.
+reshaped_stack = reshaped_stack-nanmean(reshaped_stack,1);
+% Prewhiten the signal so that so that it has zero mean and identity
+% covariance.
+reshaped_stack = prewhiten(reshaped_stack);
+% Apply PCA
+[~,reshaped_stack] = pca(reshaped_stack);
+% Check how many components to request
+if opt.n_rICA==0
+    opt.n_rICA = size(reshaped_stack, 2);
+end
+% Apply reconstruction ICA (rICA)
+rng(1)% For reproducibility
+ricaTransform = rica(reshaped_stack, opt.n_rICA, 'VerbosityLevel', 1);
+% Transform the data using the fitted model
+transformedData = transform(ricaTransform, reshaped_stack);
+% Correct sign
+TD = transformedData;
+TDv = TD ./ repmat(std(TD), size(TD,1), 1);
+TDzp = TDv - 2;
+TDzp(TDzp < 0) = 0;
+TDzpm = mean(TDzp);
+TDzn = TDv + 2;
+TDzn(TDzn > 0) = 0;
+TDznm = mean(TDzn);
+transformedData = TD .* repmat(sign(TDzpm + TDznm), size(TD, 1), 1);
+% Reshape the independent components back into a 3-D format
+reshaped_stack = reshape(transformedData, [x, y, z, size(transformedData,2)]);
+% Smooth components
+if strcmp(opt.regmax_method, 'filtered')
+    reshaped_stack = imboxfilt3(reshaped_stack, [opt.filter_size, opt.filter_size, 1]);
+end%if filter
+% Get the component with the strongest effect on a given pixel
+[~, granules_labeled] = max(reshaped_stack, [], 4);
+% Check for splits
+granules_labeled = checkSplits(granules_labeled);
+end%FCN:rICA_segmentation
+
+% -------------------------------------------------------------------------
+
+function granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, opt)
 % Get mask for neighbors
 nMask = strel('sphere', 1);
-hWait = waitbar(0, ['Refinig regions. Please wait ... (0/', num2str(n_rep),')']);
-for iRep = 1:n_rep
-    waitbar(iRep/n_rep, hWait, ['Refinig regions. Please wait ... (', num2str(iRep), '/', num2str(n_rep), ')']);
+hWait = waitbar(0, ['Refinig regions. Please wait ... (0/', num2str(opt.n_rep),')']);
+for iRep = 1:opt.n_rep
+    waitbar(iRep/opt.n_rep, hWait, ['Refinig regions. Please wait ... (', num2str(iRep), '/', num2str(opt.n_rep), ')']);
     % Keep track of changes
     previous_granules_labeled = granules_labeled;
     % Get avg signal trace per granule
@@ -427,7 +586,7 @@ for iRep = 1:n_rep
     idx_candidates = find(candidates);
     % Iterate over all pixels in border regions and check
     % whether they have to be re-assigned.
-    switch refinement_method
+    switch opt.refinement_method
         case 'corr'
             idx_candidates_newIdentiy = refinement_parfor_corr(idx_candidates, granules_labeled, reshaped_stack, granuleTC, granuleList, nMask);
         case 'rmse'
@@ -440,7 +599,7 @@ for iRep = 1:n_rep
     % can be found in more then one coherent regions
     granules_labeled = checkSplits(granules_labeled);
     % Also account for regions that are too small
-    granules_labeled = removeTinyRegions(granules_labeled, minPixCount);
+    granules_labeled = removeTinyRegions(granules_labeled, opt.minPixCount);
     % Stop if no changes
     if sum(previous_granules_labeled(:) == granules_labeled(:)) == numel(granules_labeled(:))
         break
@@ -568,7 +727,7 @@ end%FCN:checkSplits
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = removeTinyRegions(granules_labeled, minPixCount)
+function granules_labeled = removeTinyRegions(granules_labeled, opt)
 % Kick out granules that are too small. For this, iterate
 % over all granules, and check whether it is large enough. If
 % not, assign each pixel to the best neigbour.
@@ -585,46 +744,43 @@ while ~isempty(small_granules)
     % Sort base don count
     C = sortrows(C,1,"ascend");
     % Iterate over all regions and take care of those that are too small
-    small_granules = C(C(:, 1) < minPixCount, 2);
-    hWait = waitbar(0, ['Removing tiny regions ... 0/', num2str(length(small_granules))]);
-    for iGranule = 1:length(small_granules)
-        waitbar(iGranule/length(small_granules), hWait, ['Removing tiny regions ... ', num2str(iGranule), '/', num2str(length(small_granules))])
-        % Get the ID of the current granule
-        curr_ID = C(iGranule,2);
-        % Get a logical image for the current granule
-        bw = granules_labeled==curr_ID;
-        % If it is a single pixel, use the mode. Otherwise the closest
-        % value that is not the current ID
-        [x, y, z] = ind2sub(size(bw), find(bw));
-        % Create mask  including all neighbors
-        neighbors = imdilate(bw, SE) - bw;
-        % Get IDs on the edge
-        neighbor_IDs = unique(granules_labeled(find(neighbors)));
-        if C(iGranule,1) == 1
-            granules_labeled(x, y, z) = mode(neighbor_IDs(:));
-        else
-            % Iterate over all pixels of the region that is too small and
-            % assign them to the closest neighbor region
-            for iPx = 1:length(x)
-                id_table = nan(1, length(neighbor_IDs));
-                for iN = 1:length(neighbor_IDs)
-                    [Nx, Ny, Nz] = ind2sub(size(bw), find(granules_labeled==neighbor_IDs(iN)));
-                    dist = [Nx(:), Ny(:), Nz(:)] - [x(iPx), y(iPx), z(iPx)];
-                    min_dist = min(sqrt(sum(dist'.*dist'))');
-                    id_table(iN) = min_dist;
-                end%iN
-                [~,best_id] = min(id_table);
-                granules_labeled(x(iPx), y(iPx), z(iPx)) = neighbor_IDs(best_id);
-            end%iPx
-        end% if single pixel
-    end%iGranule
-    close(hWait)
+    % Note: only take the first and the check again. Otherwise we may get
+    % stuck by combining all pixels!
+    small_granules = C(C(:, 1) < opt.minPixCount, 2);
+    % Get the ID of the current granule
+    curr_ID = C(1,2);
+    % Get a logical image for the current granule
+    bw = granules_labeled==curr_ID;
+    % If it is a single pixel, use the mode. Otherwise the closest
+    % value that is not the current ID
+    [x, y, z] = ind2sub(size(bw), find(bw));
+    % Create mask  including all neighbors
+    neighbors = imdilate(bw, SE) - bw;
+    % Get IDs on the edge
+    neighbor_IDs = unique(granules_labeled(find(neighbors)));
+    if C(1,1) == 1
+        granules_labeled(x, y, z) = mode(neighbor_IDs(:));
+    else
+        % Iterate over all pixels of the region that is too small and
+        % assign them to the closest neighbor region
+        for iPx = 1:length(x)
+            id_table = nan(1, length(neighbor_IDs));
+            for iN = 1:length(neighbor_IDs)
+                [Nx, Ny, Nz] = ind2sub(size(bw), find(granules_labeled==neighbor_IDs(iN)));
+                dist = [Nx(:), Ny(:), Nz(:)] - [x(iPx), y(iPx), z(iPx)];
+                min_dist = min(sqrt(sum(dist'.*dist'))');
+                id_table(iN) = min_dist;
+            end%iN
+            [~,best_id] = min(id_table);
+            granules_labeled(x(iPx), y(iPx), z(iPx)) = neighbor_IDs(best_id);
+        end%iPx
+    end% if single pixel
 end%while
 end%FCN:removeTinyRegions
 
 % -------------------------------------------------------------------------
 
-function [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, projection_method)
+function [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, opt)
 % Pool pixels belonging to the same granule
 % --- Get list of granules
 granuleList = unique(granules_labeled);
@@ -658,7 +814,7 @@ for iGranule = 1:length(granuleList)
     summary_stats.granule_Corr_img(idx_granule) = summary_stats.granule_Corr(iGranule,1);
 end%iGranule
 % Based on the projection method, estimate which regions are active
-switch projection_method
+switch opt.projection_method
     case 'std'
         summary_stats.active_region.map = imbinarize(summary_stats.granule_Std_img);
         summary_stats.active_region.method = 'std';
