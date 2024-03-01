@@ -77,7 +77,7 @@ function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
 %                                  distribution of granule sizes before
 %                                  refinement. Here, a is set to be the
 %                                  5th quantile and b to be the 95th
-%                                  quntile. The filter size for    
+%                                  quantile. The filter size for    
 %                                  regmax_method is set to 1.
 %
 % 'corr_thresh'       : Threshold for the Pearson correlation coefficient
@@ -183,7 +183,7 @@ opt.aspect_ratio = [1 1 1];
 opt.projection_method = 'std';
 opt.init_seg_method = 'voronoi';
 opt.regmax_method = 'raw';
-opt.n_rep = 0;
+opt.n_rep = 50;
 opt.refinement_method = 'rmse';
 opt.minPixCount = 1;
 opt.corr_thresh = 0.85;
