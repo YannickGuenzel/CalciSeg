@@ -77,7 +77,7 @@ function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
 %                                  distribution of granule sizes before
 %                                  refinement. Here, a is set to be the
 %                                  5th quantile and b to be the 95th
-%                                  quantile. The filter size for    
+%                                  quntile. The filter size for    
 %                                  regmax_method is set to 1.
 %
 % 'corr_thresh'       : Threshold for the Pearson correlation coefficient
@@ -91,6 +91,12 @@ function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
 %                       either an undercomplete (n_rICA < number of frames)
 %                       or overcomplete (n_rICA > number of frames) feature 
 %                       representations.
+%
+% 'n_PCA'             : Percentage of the total variance of the data that
+% (number)              should be kept if the projection_method is set to
+%                       'pca'. The value must be larger than zero and not
+%                       exceed 100.
+%                       Default: 100
 %
 %
 % OUTPUT
@@ -124,7 +130,7 @@ function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
 %                      - active_region.method : Method used for binarizing
 %
 %
-% Version: 29-Feb-24 (R2023a)
+% Version: 18-April-24 (R2023a)
 % =========================================================================
 
 % Validate inputs
@@ -183,11 +189,12 @@ opt.aspect_ratio = [1 1 1];
 opt.projection_method = 'std';
 opt.init_seg_method = 'voronoi';
 opt.regmax_method = 'raw';
-opt.n_rep = 50;
+opt.n_rep = 0;
 opt.refinement_method = 'rmse';
 opt.minPixCount = 1;
 opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
+opt.n_PCA = 100;
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -267,6 +274,12 @@ if ~isempty(varargin)
                     else
                         opt.n_rICA = round(varargin{iArg+1});
                     end
+                case 'n_PCA'
+                    if ~isnumeric(varargin{iArg+1}) || varargin{iArg+1} <= 0 || varargin{iArg+1} > 100
+                        error('Input "n_PCA" must be an number larger than 0 and smaller than 100.');
+                    else
+                        opt.n_PCA = round(varargin{iArg+1});
+                    end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
             end%switch
@@ -318,8 +331,8 @@ switch opt.projection_method
         projection = nanmin(stack, [], 4);
     case 'pca'
         [~, stack, ~, ~, explained] = pca(reshape(stack, [x*y*z, t]));
-        if ~isempty(find(cumsum(explained)>=99.99,1))
-            t = find(cumsum(explained)>=99.99,1);
+        if ~isempty(find(cumsum(explained)>=opt.n_PCA,1))
+            t = find(cumsum(explained)>=opt.n_PCA,1);
         end%if
         stack = reshape(stack(:,1:t), [x, y, z, t]);
         projection = squeeze(stack(:,:,:,1));
@@ -349,6 +362,8 @@ switch opt.init_segment_method
     case 'rICA'
         granules_labeled = rICA_segmentation(projection, reshaped_stack, opt);
 end%switch opt.init_segment_method
+% Check for splits
+granules_labeled = checkSplits(granules_labeled);
 end%FCN:initialSegmentation
 
 % -------------------------------------------------------------------------
@@ -493,7 +508,12 @@ for iPx = 1:px_cnt
             % Keep track of whether pixels got added
             added_px = zeros(1, length(neighbors_ind_X));
             % Check neighbors
-            for iN = 1:length(neighbors_ind_X)
+            if (length(neighbors_ind_X) + sum(granules_labeled(:)==cnt_id)) > max_size
+                stop_ind = (length(neighbors_ind_X) + sum(granules_labeled(:)==cnt_id)) - max_size;
+            else
+                stop_ind = 0;
+            end
+            for iN = 1:length(neighbors_ind_X(1:end-stop_ind))
                 if (granules_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN)) == 0) && (corr(curr_TC(:), squeeze(stack(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN),:))) >= sqrt(0.85))
                     granules_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN), neighbors_ind_Z(iN)) = cnt_id;
                     added_px(iN) = 1;
@@ -555,8 +575,6 @@ if strcmp(opt.regmax_method, 'filtered')
 end%if filter
 % Get the component with the strongest effect on a given pixel
 [~, granules_labeled] = max(reshaped_stack, [], 4);
-% Check for splits
-granules_labeled = checkSplits(granules_labeled);
 end%FCN:rICA_segmentation
 
 % -------------------------------------------------------------------------

@@ -32,7 +32,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % (string)             Default: 'voronoi'
 %                       - 'voronoi' : Delaunay triangulation
 %                       - 'corr'    : Local growing based on correlation.
-%                                   : This will set 'projection_method' to
+%                                     This will set 'projection_method' to
 %                                     be 'corr'
 %                       - 'rICA'    : Reconstruction independent component 
 %                                     analysis.
@@ -75,7 +75,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                                  distribution of granule sizes before
 %                                  refinement. Here, a is set to be the
 %                                  5th quantile and b to be the 95th
-%                                  quantile. The filter size for    
+%                                  quntile. The filter size for    
 %                                  regmax_method is set to 1.
 %
 % 'corr_thresh'       : Threshold for the Pearson correlation coefficient
@@ -89,6 +89,12 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                       either an undercomplete (n_rICA < number of frames)
 %                       or overcomplete (n_rICA > number of frames) feature 
 %                       representations.
+%
+% 'n_PCA'             : Percentage of the total variance of the data that
+% (number)              should be kept if the projection_method is set to
+%                       'pca'. The value must be larger than zero and not
+%                       exceed 100.
+%                       Default: 100
 %
 %
 % OUTPUT
@@ -122,7 +128,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - active_region.method : Method used for binarizing
 %
 %
-% Version: 29-Feb-24 (R2023a)
+% Version: 18-April-24 (R2023a)
 % =========================================================================
 
 
@@ -168,7 +174,7 @@ end%if auto min size
 % of pixels. Note, first run removeHugeRegions, as this may create tiny
 % regions.
 granules_labeled = removeHugeRegions(granules_labeled, opt.limitPixCount(2));
-granules_labeled = removeTinyRegions(granules_labeled, opt.limitPixCount(1));
+granules_labeled = removeTinyRegions(reshaped_stack, granules_labeled, opt);
 if opt.n_rep>0
     granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, opt);
 end%if refine
@@ -188,11 +194,12 @@ function opt = validateInputs(stack, varargin)
 opt.projection_method = 'std';
 opt.init_seg_method = 'voronoi';
 opt.regmax_method = 'raw';
-opt.n_rep = 50;
+opt.n_rep = 0;
 opt.refinement_method = 'rmse';
 opt.limitPixCount = [1 inf];
 opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
+opt.n_PCA = 100;
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -265,6 +272,12 @@ if ~isempty(varargin)
                     else
                         opt.n_rICA = round(varargin{iArg+1});
                     end
+                case 'n_PCA'
+                    if ~isnumeric(varargin{iArg+1}) || varargin{iArg+1} <= 0 || varargin{iArg+1} > 100
+                        error('Input "n_PCA" must be an number larger than 0 and smaller than 100.');
+                    else
+                        opt.n_PCA = round(varargin{iArg+1});
+                    end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
             end%switch
@@ -317,8 +330,8 @@ switch opt.projection_method
         projection = nanmin(stack, [], 3);
     case 'pca'
         [~, stack, ~, ~, explained] = pca(reshape(stack, [x*y, t]));
-        if ~isempty(find(cumsum(explained)>=99.99,1))
-            t = find(cumsum(explained)>=99.99,1);
+        if ~isempty(find(cumsum(explained)>=opt.n_PCA,1))
+            t = find(cumsum(explained)>=opt.n_PCA,1);
         end%if
         stack = reshape(stack(:,1:t), [x, y, t]);
         projection = squeeze(stack(:,:,1));
@@ -347,6 +360,8 @@ switch opt.init_seg_method
         granules_labeled = growing_regions(stack, projection, reshaped_stack, opt);
     case 'rICA'
         granules_labeled = rICA_segmentation(projection, reshaped_stack, opt);
+        % Check for splits
+        granules_labeled = checkSplits(granules_labeled);
 end%switch opt.init_seg_method
 end%FCN:initialSegmentation
 
@@ -478,7 +493,12 @@ for iPx = 1:px_cnt
             % Keep track of whether pixels got added
             added_px = zeros(1, length(neighbors_ind_X));
             % Check neighbors
-            for iN = 1:length(neighbors_ind_X)
+            if (length(neighbors_ind_X) + sum(granules_labeled(:)==cnt_id)) > max_size
+                stop_ind = (length(neighbors_ind_X) + sum(granules_labeled(:)==cnt_id)) - max_size;
+            else
+                stop_ind = 0;
+            end
+            for iN = 1:length(neighbors_ind_X(1:end-stop_ind))
                 if (granules_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN)) == 0) && (corr(curr_TC(:), squeeze(stack(neighbors_ind_X(iN), neighbors_ind_Y(iN),:))) >= opt.corr_thresh)
                     granules_labeled(neighbors_ind_X(iN), neighbors_ind_Y(iN)) = cnt_id;
                     added_px(iN) = 1;
@@ -540,8 +560,6 @@ if strcmp(opt.regmax_method, 'filtered')
 end%if filter
 % Get the component with the strongest effect on a given pixel
 [~, granules_labeled] = max(reshaped_stack, [], 3);
-% Check for splits
-granules_labeled = checkSplits(granules_labeled);
 end%FCN:rICA_segmentation
 
 % -------------------------------------------------------------------------
@@ -616,7 +634,7 @@ for iRep = 1:opt.n_rep
     % of pixels. Note, first run removeHugeRegions, as this may create tiny
     % regions.
     granules_labeled = removeHugeRegions(granules_labeled, opt.limitPixCount(2));
-    granules_labeled = removeTinyRegions(granules_labeled, opt.limitPixCount(1));
+    granules_labeled = removeTinyRegions(reshaped_stack, granules_labeled, opt);
     % Stop if no changes
     if sum(previous_granules_labeled(:) == granules_labeled(:)) == numel(granules_labeled(:))
         break
@@ -646,7 +664,7 @@ parfor iCan = 1:length(idx_candidates)
     voronoi_R = zeros(length(nC),1);
     for iN = 1:length(nC)
         activity_cluster = granuleTC(granuleList == nC(iN), :);
-        r = corrcoef(activity_px, activity_cluster); voronoi_R(iN) = 1/r(2);
+        r = corrcoef(activity_px, activity_cluster); voronoi_R(iN) = abs(diff([1, r(2)]));
     end%iN
     % Assign new identity
     [~, iBest] = min(voronoi_R);
@@ -731,10 +749,10 @@ end%FCN:checkSplits
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = removeTinyRegions(granules_labeled, minPixCount)
+function granules_labeled = removeTinyRegions(reshaped_stack, granules_labeled, opt)
 % Kick out granules that are too small. For this, iterate
 % over all granules, and check whether it is large enough. If
-% not, assign each pixel to the best neighbour.
+% not, assign it to the best neighbour.
 % Repeat as long as all small granules are gone.
 small_granules = inf;
 while ~isempty(small_granules)
@@ -746,37 +764,42 @@ while ~isempty(small_granules)
     % Sort base don count
     C = sortrows(C,1,"ascend");
     % Iterate over all regions and take care of those that are too small.
-    % Note: only take the first and the check again. Otherwise we may get
+    % Note: only take the first and then check again. Otherwise we may get
     % stuck by combining all pixels!
-    small_granules = C(C(:, 1) < minPixCount, 2);
+    small_granules = C(C(:, 1) < opt.limitPixCount(1), 2);
     % Get the ID of the current granule
     curr_ID = C(1,2);
     % Get a logical image for the current granule
     bw = granules_labeled==curr_ID;
-    % If it is a single pixel, use the mode. Otherwise the closest
-    % value that is not the current ID
-    [x, y] = ind2sub(size(bw), find(bw));
+    % Get the pixels of the current granule
+    ind_pix = find(bw);
+    % Get the current time course
+    curr_TC = nanmean(reshaped_stack(ind_pix, :), 1);
     % Get pixels on the edge
     neighbors = imgradient(bw, 'central')>0;
     neighbors(bw) = 0;
     neighbor_IDs = unique(granules_labeled(neighbors));
-    if C(1,1) == 1
-        granules_labeled(x, y) = mode(neighbor_IDs(:));
-    else
-        % Iterate over all pixels of the region that is too small and
-        % assign them to the closest neighbor region
-        for iPx = 1:length(x)
-            id_table = nan(1, length(neighbor_IDs));
-            for iN = 1:length(neighbor_IDs)
-                [Nx, Ny] = ind2sub(size(bw), find(granules_labeled==neighbor_IDs(iN)));
-                dist = [Nx(:), Ny(:)] - [x(iPx), y(iPx)];
-                min_dist = min(sqrt(sum(dist'.*dist'))');
-                id_table(iN) = min_dist;
-            end%iN
-            [~,best_id] = min(id_table);
-            granules_labeled(x(iPx), y(iPx)) = neighbor_IDs(best_id);
-        end%iPx
-    end% if single pixel
+    % Get the neighbors' time courses
+    TCs = nan(length(neighbor_IDs), size(reshaped_stack,2));
+    for iTC = 1:length(neighbor_IDs)
+        ind = find(granules_labeled==neighbor_IDs(iTC));
+        TCs(iTC,:) = nanmean(reshaped_stack(ind,:),1);
+    end%iTC    
+    % Check which neighboring granule is the best fit
+    id_table = nan(1, length(neighbor_IDs));
+    for iN = 1:length(neighbor_IDs)
+        % Get the rmse or distance based on correlation
+        switch opt.refinement_method
+            case 'corr'
+                min_dist = corrcoef(curr_TC, TCs(iN,:)); min_dist = abs(diff([1, min_dist(2)]));
+            case 'rmse'
+                min_dist = sqrt(median(curr_TC - TCs(iN,:)).^2);
+        end
+        id_table(iN) = min_dist;
+    end%iN
+    % Assign all pixels of the current granule to the best fitting neighbor
+    [~,best_id] = min(id_table);
+    granules_labeled(ind_pix) = neighbor_IDs(best_id(1));
 end%while
 end%FCN:removeTinyRegions
 
