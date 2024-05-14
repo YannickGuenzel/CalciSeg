@@ -11,7 +11,7 @@ Contents
 1.	[About](#about)  
 2.	[Requirements](#requirements)  
 3.	[Running CalciSeg](#running-calciseg)  
-4.	[Cite](#cite)
+4.	[Cite code as](#cite)
 
 
 About
@@ -68,9 +68,11 @@ For **CalciSeg_3D**, the input remains similar. Note the additional parameter *a
 - pockets_labeled: resulting segmentation. An ID was assigned to each pixel.
 - summary_stats: summarizing statisitcs.
 
-Cite
-----
+
+Cite code as
+------------
 If you use **CalciSeg**, please cite it using this DOI:
-[![DOI]( *coming soon* )
+[![DOI](https://zenodo.org/badge/671860103.svg)](https://zenodo.org/doi/10.5281/zenodo.11190097)
+
 
 Thank you for using **CalciSeg**!
