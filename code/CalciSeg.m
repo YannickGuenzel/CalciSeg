@@ -96,6 +96,9 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                       exceed 100.
 %                       Default: 100
 %
+% 'fillmissing'       : Replace NaNs or Infs by linear interpolation of 
+% (logical)             neighboring, nonmissing values.
+%                       Default: false
 %
 % OUTPUT
 % Parameter name      Values and description
@@ -141,6 +144,17 @@ stack_size = whos('stack');
 if ~strcmp(stack_size.class, 'single')
     stack = single(stack);
 end%if not single precision
+
+% Check for missing data
+if any(isnan(stack(:))) || any(isinf(stack(:)))
+    if opt.fillmissing
+        % Fill missnig data
+        stack(isinf(stack)) = NaN;
+        stack = fillmissing(stack, "linear");
+    else
+        error('The stack contains NaN or inf values. Please check your data or set the input "fillmissing" to true.')
+    end%if fill
+end%if missing data
 
 % Define size for local neighborhood
 if isnumeric(opt.limitPixCount)
@@ -200,6 +214,7 @@ opt.limitPixCount = [1 inf];
 opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
 opt.n_PCA = 100;
+opt.fillmissing = false;
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -277,6 +292,12 @@ if ~isempty(varargin)
                         error('Input "n_PCA" must be an number larger than 0 and smaller than 100.');
                     else
                         opt.n_PCA = round(varargin{iArg+1});
+                    end
+                case 'fillmissing'
+                    if ~islogical(varargin{iArg+1})
+                        error('Input "fillmissing" must be a logical true or false.');
+                    else
+                        opt.fillmissing = varargin{iArg+1};
                     end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
