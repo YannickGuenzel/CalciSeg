@@ -100,6 +100,12 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % (logical)             neighboring, nonmissing values.
 %                       Default: false
 %
+% 'resumeCalciSeg'    : Map with granule IDs from a previous segmentation
+% (2-D matrix)          session. Providing this input will skip all initial
+%                       segmentation step and directly jump to refinement.
+%                       Default: []
+%
+%
 % OUTPUT
 % Parameter name      Values and description
 % =========================================================================
@@ -215,6 +221,7 @@ opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
 opt.n_PCA = 100;
 opt.fillmissing = false;
+opt.resumeCalciSeg = [];
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -298,6 +305,12 @@ if ~isempty(varargin)
                         error('Input "fillmissing" must be a logical true or false.');
                     else
                         opt.fillmissing = varargin{iArg+1};
+                    end
+                case 'resumeCalciSeg'
+                    if ~isnumeric(varargin{iArg+1}) || length(size(varargin{iArg+1})) > 2 || size(varargin{iArg+1},1) ~= size(stack,1) || size(varargin{iArg+1},2) ~= size(stack,2)
+                        error('Input "resumeCalciSeg" must be a 2-D matrix of integers with the same spatial size as "stack".');
+                    else
+                        opt.resumeCalciSeg = single(varargin{iArg+1});
                     end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
@@ -636,7 +649,7 @@ for iRep = 1:opt.n_rep
     idx_candidates = find(candidates);
     idx_table = reshape(1:numel(granules_labeled), size(granules_labeled));
     % Iterate over all pixels in border regions and check
-    % whether thez have to be re-assigned.
+    % whether they have to be re-assigned.
     previous_granules_labeled = granules_labeled;
     switch opt.refinement_method
         case 'corr'

@@ -98,6 +98,11 @@ function [granules_labeled, summary_stats] = CalciSeg_3D(stack, varargin)
 %                       exceed 100.
 %                       Default: 100
 %
+% 'resumeCalciSeg'    : Map with granule IDs from a previous segmentation
+% (3-D matrix)          session. Providing this input will skip all initial
+%                       segmentation step and directly jump to refinement.
+%                       Default: []
+%
 %
 % OUTPUT
 % Parameter name      Values and description
@@ -143,6 +148,17 @@ if ~strcmp(stack_size.class, 'single')
     stack = single(stack);
 end%if not single precision
 
+% Check for missing data
+if any(isnan(stack(:))) || any(isinf(stack(:)))
+    if opt.fillmissing
+        % Fill missnig data
+        stack(isinf(stack)) = NaN;
+        stack = fillmissing(stack, "linear");
+    else
+        error('The stack contains NaN or inf values. Please check your data or set the input "fillmissing" to true.')
+    end%if fill
+end%if missing data
+
 % Define size for local neighborhood
 if isnumeric(opt.minPixCount)
     opt.filter_size = ceil(sqrt(opt.minPixCount(1)/pi)) + double(opt.minPixCount(1)==0);
@@ -153,8 +169,14 @@ end
 % Initial preprocessing
 [reshaped_stack, projection] = initialPreprocessing(stack, opt);
 
-% Perform initial segmentation
-granules_labeled = initialSegmentation(stack, reshaped_stack, projection, opt);
+% Check whether to resume segmentation or start with a new one
+if isempty(opt.resumeCalciSeg)
+    % Perform initial segmentation
+    granules_labeled = initialSegmentation(stack, reshaped_stack, projection, opt);
+else
+    % Use previous segmentation
+    granules_labeled = opt.resumeCalciSeg;
+end%if resume
 
 % Maybe, the user wants to have the min/max size estimated based on the data
 if (isstring(opt.minPixCount) || ischar(opt.minPixCount)) && strcmp(opt.minPixCount, 'auto')
@@ -195,6 +217,8 @@ opt.minPixCount = 1;
 opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
 opt.n_PCA = 100;
+opt.fillmissing = false;
+opt.resumeCalciSeg = [];
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -254,9 +278,9 @@ if ~isempty(varargin)
                     % Minimum and maximum number of pixels per region -------------
                 case 'minPixCount'
                     if ~isnumeric(varargin{iArg+1}) && ~strcmp(varargin{iArg+1}, 'auto')
-                        error( 'Input "minPixCount" must be a non-negative pair of two integer values or "auto".');
-                    elseif isnumeric(varargin{iArg+1}) && length(varargin{iArg+1}) ~= 2
-                        error('Input "minPixCount" must be a non-negative pair of two integer values or "auto".');
+                        error( 'Input "minPixCount" must be a non-negative integer value or "auto".');
+                    elseif isnumeric(varargin{iArg+1}) && length(varargin{iArg+1}) ~= 1
+                        error( 'Input "minPixCount" must be a non-negative integer value or "auto".');
                     else
                         opt.minPixCount = varargin{iArg+1};
                     end
@@ -280,6 +304,18 @@ if ~isempty(varargin)
                     else
                         opt.n_PCA = round(varargin{iArg+1});
                     end
+                case 'fillmissing'
+                    if ~islogical(varargin{iArg+1})
+                        error('Input "fillmissing" must be a logical true or false.');
+                    else
+                        opt.fillmissing = varargin{iArg+1};
+                    end
+                case 'resumeCalciSeg'
+                    if ~isnumeric(varargin{iArg+1}) || length(size(varargin{iArg+1})) > 3 || size(varargin{iArg+1},1) ~= size(stack,1) || size(varargin{iArg+1},2) ~= size(stack,2) || size(varargin{iArg+1},3) ~= size(stack,3)
+                        error('Input "resumeCalciSeg" must be a 3-D matrix of integers with the same spatial size as "stack".');
+                    else
+                        opt.resumeCalciSeg = single(varargin{iArg+1});
+                    end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
             end%switch
@@ -288,9 +324,9 @@ if ~isempty(varargin)
 end%if custom arguments
 
 % Last, validate 'stack' input and potentially adjust some input parameters
-if ndims(stack) < 2
-    error('Input "stack" has to be at least a 2-D (x,y) matrix.')
-elseif ndims(stack) > 3
+if ndims(stack) < 3
+    error('Input "stack" has to be at least a 3-D (x,y) matrix.')
+elseif ndims(stack) > 4
     error('Number of dimension of the input "stack" cannot exceed 4.')
 elseif ismatrix(stack)
     warning('Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_segment_method="voronoi"; refinement_method="rmse").');
@@ -344,14 +380,14 @@ switch opt.projection_method
 end%switch projection method
 
 % Reshape the stack to a 2D matrix for further processing
-reshaped_stack = reshape(stack, [x*y, t]);
+reshaped_stack = reshape(stack, [x*y*z, t]);
 
 end%FCN:initialPreprocessing
 
 % -------------------------------------------------------------------------
 
 function granules_labeled = initialSegmentation(stack, reshaped_stack, projection, opt)
-switch opt.init_segment_method
+switch opt.init_seg_method
     case 'voronoi'
         % Get local maxima and minima
         [regional_maxima, regional_minima] = identifyLocalExtrema(projection, opt);
@@ -361,7 +397,7 @@ switch opt.init_segment_method
         granules_labeled = growing_regions(stack, projection, reshaped_stack, opt);
     case 'rICA'
         granules_labeled = rICA_segmentation(projection, reshaped_stack, opt);
-end%switch opt.init_segment_method
+end%switch opt.init_seg_method
 % Check for splits
 granules_labeled = checkSplits(granules_labeled);
 end%FCN:initialSegmentation
@@ -577,6 +613,29 @@ end%if filter
 [~, granules_labeled] = max(reshaped_stack, [], 4);
 end%FCN:rICA_segmentation
 
+function Z = prewhiten(X)
+    % From https://de.mathworks.com/help/stats/extract-mixed-signals.html
+    % 1. Size of X.
+    [N,P] = size(X);
+    assert(N >= P);
+    % 2. SVD of covariance of X. We could also use svd(X) to proceed but N
+    % can be large and so we sacrifice some accuracy for speed.
+    [U,Sig] = svd(cov(X));
+    Sig     = diag(Sig);
+    Sig     = Sig(:)';
+    % 3. Figure out which values of Sig are non-zero.
+    tol = eps(class(X));
+    idx = (Sig > max(Sig)*tol);
+    assert(~all(idx == 0));
+    % 4. Get the non-zero elements of Sig and corresponding columns of U.
+    Sig = Sig(idx);
+    U   = U(:,idx);
+    % 5. Compute prewhitened data.
+    mu = mean(X,1);
+    Z = X-mu;
+    Z = (Z*U)./sqrt(Sig);
+end%FCN:prewhiten
+
 % -------------------------------------------------------------------------
 
 function granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, opt)
@@ -595,6 +654,7 @@ for iRep = 1:opt.n_rep
     % Preallocation
     granuleTC = zeros(nGroups, size(reshaped_stack, 2));
     % Applying accumarray for each column
+    granuleList = unique(granules_labeled);
     for iCol = 1:size(reshaped_stack, 2)
         granuleTC(:, iCol) = accumarray(groupIndices, reshaped_stack(:, iCol), [], @mean);
     end
@@ -617,7 +677,7 @@ for iRep = 1:opt.n_rep
     % can be found in more then one coherent regions
     granules_labeled = checkSplits(granules_labeled);
     % Also account for regions that are too small
-    granules_labeled = removeTinyRegions(granules_labeled, opt.minPixCount);
+    granules_labeled = removeTinyRegions(granules_labeled, opt);
     % Stop if no changes
     if sum(previous_granules_labeled(:) == granules_labeled(:)) == numel(granules_labeled(:))
         break
