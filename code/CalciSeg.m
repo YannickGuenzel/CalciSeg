@@ -244,7 +244,7 @@ if ~isempty(varargin)
                 case 'init_seg_method'
                     valid_init_seg_methods = {'voronoi', 'corr', 'rICA'};
                     if ~ismember(varargin{iArg+1}, valid_init_seg_methods)
-                        error(sprintf('Invalid "projection_method". Valid options are: %s.', strjoin(valid_projection_methods, ', ')));
+                        error(sprintf('Invalid "init_seg_method". Valid options are: %s.', strjoin(valid_init_seg_methods, ', ')));
                     else
                         opt.init_seg_method = varargin{iArg+1};
                     end
