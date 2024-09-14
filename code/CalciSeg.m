@@ -11,7 +11,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % Parameter name        Values and description
 % =========================================================================
 %
-% 'projection_method'   Method for calculating the projection
+% 'projection_method' : Method for calculating the projection
 % (string)              across time.
 %                       Default: 'std'
 %                       - 'std'    : Standard deviation projection
@@ -28,8 +28,8 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                                    dimension or when to take the first 
 %                                    slice of the 3-D stack
 %
-% 'init_seg_method'    Method for the initial segmentation.
-% (string)             Default: 'voronoi'
+% 'init_seg_method'   : Method for the initial segmentation.
+% (string)              Default: 'voronoi'
 %                       - 'voronoi' : Delaunay triangulation
 %                       - 'corr'    : Local growing based on correlation.
 %                                     This will set 'projection_method' to
@@ -37,7 +37,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                       - 'rICA'    : Reconstruction independent component 
 %                                     analysis.
 %
-% 'regmax_method'       Method for determining how to identify local
+% 'regmax_method'     : Method for determining how to identify local
 % (string)              extrema in the intensity projection.
 %                       Default: 'raw'
 %                       - 'raw'      : Simply apply imregionalmax/-min on
@@ -55,10 +55,10 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                                      applicable when init_seg_method is
 %                                      set to be 'voronoi'. 
 %
-% 'n_rep'               Number of iterations for refining the regions.
+% 'n_rep'             : Number of iterations for refining the regions.
 % (integer)             Default: 0
 %
-% 'refinement_method'   Measure to fine-tune granule assignment during 
+% 'refinement_method' : Measure to fine-tune granule assignment during 
 % (string)              refinement iterations.
 %                       Default: 'rmse'
 %                       - 'rmse' : Root median square error
@@ -75,7 +75,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                                  distribution of granule sizes before
 %                                  refinement. Here, a is set to be the
 %                                  5th quantile and b to be the 95th
-%                                  quntile. The filter size for    
+%                                  quantile. The filter size for    
 %                                  regmax_method is set to 1.
 %
 % 'corr_thresh'       : Threshold for the Pearson correlation coefficient
@@ -100,10 +100,23 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % (logical)             neighboring, nonmissing values.
 %                       Default: false
 %
-% 'resumeCalciSeg'    : Map with granule IDs from a previous segmentation
+% 'resume_CalciSeg'    : Map with granule IDs from a previous segmentation
 % (2-D matrix)          session. Providing this input will skip all initial
 %                       segmentation step and directly jump to refinement.
 %                       Default: []
+%
+% 'pool_fragments'    : Sometimes, granules belonging to the same bio-
+% (logical)             logical structure are fragmented into one or
+%                       multiple pieces. To account for this, we 
+%                       calculate the Pearson correlation coefficient 
+%                       between neighboring granules and pool them if the 
+%                       correlation exceeds the threshold set using input 
+%                       'corr_thresh' (default: 0.85). The neighbor 
+%                       comparison is repeated until no granule pair 
+%                       exceeds the threshold. Note that this setting  
+%                       ignores the upper limit for pixel area per granule 
+%                       since it is applied after the refinement step.
+%                       Default: false
 %
 %
 % OUTPUT
@@ -137,7 +150,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - active_region.method : Method used for binarizing
 %
 %
-% Version: 18-April-24 (R2023a)
+% Version: 14-Sep-24 (R2023a)
 % =========================================================================
 
 
@@ -199,6 +212,11 @@ if opt.n_rep>0
     granules_labeled = refineSegmentation(reshaped_stack, granules_labeled, opt);
 end%if refine
 
+% Check for fragmented granules
+if opt.pool_fragments
+    granules_labeled = poolFagmentedGranules(reshaped_stack, granules_labeled, opt);
+end%if pool fragments
+
 % Final refinement steps and statistics calculation
 if nargout>1
     [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, opt);
@@ -221,7 +239,8 @@ opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
 opt.n_PCA = 100;
 opt.fillmissing = false;
-opt.resumeCalciSeg = [];
+opt.resume_CalciSeg = [];
+opt.pool_fragments = false;
 
 % Now, check optional input variable
 varargin = varargin{1};
@@ -306,11 +325,17 @@ if ~isempty(varargin)
                     else
                         opt.fillmissing = varargin{iArg+1};
                     end
-                case 'resumeCalciSeg'
+                case 'resume_CalciSeg'
                     if ~isnumeric(varargin{iArg+1}) || length(size(varargin{iArg+1})) > 2 || size(varargin{iArg+1},1) ~= size(stack,1) || size(varargin{iArg+1},2) ~= size(stack,2)
-                        error('Input "resumeCalciSeg" must be a 2-D matrix of integers with the same spatial size as "stack".');
+                        error('Input "resume_CalciSeg" must be a 2-D matrix of integers with the same spatial size as "stack".');
                     else
-                        opt.resumeCalciSeg = single(varargin{iArg+1});
+                        opt.resume_CalciSeg = single(varargin{iArg+1});
+                    end
+                case 'pool_fragments'
+                    if ~islogical(varargin{iArg+1})
+                        error('Input "pool_fragments" must be a logical true or false.');
+                    else
+                        opt.pool_fragments = varargin{iArg+1};
                     end
                 otherwise
                     error(['Unknown argument "',varargin{iArg},'"'])
@@ -931,6 +956,64 @@ while ~isempty(large_granules)
     end%iGranule
 end%while
 end%FCN:removeHugeRegions
+
+% -------------------------------------------------------------------------
+
+function granules_labeled = poolFagmentedGranules(reshaped_stack, granules_labeled, opt)
+% Do this until all pairs are pooled
+while true
+    % Get a list of granules
+    granuleList = unique(granules_labeled);
+    % Get each granule's time course
+    avgTCs = nan(length(granuleList), size(reshaped_stack,2));
+    for iGranule = 1:length(granuleList)
+        % Get their index positions
+        idx_granule = find(granules_labeled==granuleList(iGranule));
+        % Get the avg time course of the current granule
+        avgTCs(iGranule,:) = nanmean(reshaped_stack(idx_granule,:),1);
+    end%iGranule
+    % Get the pairwise correlation between granules
+    corrMat = corr(avgTCs', avgTCs');
+    % Kick out upper triangle and diagonal
+    corrMat(triu(true(size(corrMat)), 1)) = 0;
+    corrMat(1:size(corrMat,1)+1:end) = 0;
+    % Check all pairs above a certain level and combine them if they are
+    % neighbors
+    [corrMat_x, corrMat_y] = find(corrMat > opt.corr_thresh);
+    % Iterate over all
+    combineIDs = nan(length(corrMat_x), 2);
+    for iTC = 1:length(corrMat_x)
+        % Check whether the two time courses belong to neighbornig pixels
+        region1 = (granules_labeled == corrMat_x(iTC));
+        region2 = (granules_labeled == corrMat_y(iTC));
+        dilated_region1 = imdilate(region1, strel('square', 3));
+        are_neighbors = any(dilated_region1(:) & region2(:));
+        if are_neighbors
+            combineIDs(iTC,:) = [granuleList(corrMat_x(iTC)), granuleList(corrMat_y(iTC))];
+        end%if neighbors
+    end%iTC
+    combineIDs(any(isnan(combineIDs),2),:) = [];
+    % Stop, when there is nothing left to pool
+    if isempty(combineIDs)
+        break
+    end%if empty
+    % Get a all connected IDs
+    G = graph(combineIDs(:,1), combineIDs(:,2));
+    bin = conncomp(G);
+    % Check all groups
+    for iG = 1:max(bin)
+        % Get ID list
+        ID_list = find(bin == iG);
+        if length(ID_list)>1
+            % Assign a new ID to those connected
+            newID = max(granules_labeled(:))+1;
+            for iID = 1:length(ID_list)
+                granules_labeled(granules_labeled==ID_list(iID)) = newID;
+            end%iID
+        end%if connected
+    end%iG
+end%while
+end%FCN:poolFagmentedGranules
 
 % -------------------------------------------------------------------------
 
