@@ -150,7 +150,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - active_region.method : Method used for binarizing
 %
 %
-% Version: 14-Sep-24 (R2023a)
+% Version: 03-Oct-24 (R2023a)
 % =========================================================================
 
 
@@ -217,9 +217,12 @@ if opt.pool_fragments
     granules_labeled = poolFagmentedGranules(reshaped_stack, granules_labeled, opt);
 end%if pool fragments
 
+% Ensure that the highest ID equals the number of granules 
+granules_labeled = finalRefinement(granules_labeled);
+
 % Final refinement steps and statistics calculation
 if nargout>1
-    [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, opt);
+    [granules_labeled, summary_stats] = regionStats(reshaped_stack, granules_labeled, opt);
     summary_stats.projection = projection;
 end%if summary stats
 
@@ -984,10 +987,11 @@ while true
     combineIDs = nan(length(corrMat_x), 2);
     for iTC = 1:length(corrMat_x)
         % Check whether the two time courses belong to neighbornig pixels
-        region1 = (granules_labeled == corrMat_x(iTC));
-        region2 = (granules_labeled == corrMat_y(iTC));
+        region1 = (granules_labeled == granuleList(corrMat_x(iTC)));
+        region2 = (granules_labeled == granuleList(corrMat_y(iTC)));
         dilated_region1 = imdilate(region1, strel('square', 3));
-        are_neighbors = any(dilated_region1(:) & region2(:));
+        dilated_region2 = imdilate(region2, strel('square', 3));
+        are_neighbors = any(dilated_region1(:) & region2(:)) || any(region1(:) & dilated_region2(:));
         if are_neighbors
             combineIDs(iTC,:) = [granuleList(corrMat_x(iTC)), granuleList(corrMat_y(iTC))];
         end%if neighbors
@@ -1007,6 +1011,7 @@ while true
         if length(ID_list)>1
             % Assign a new ID to those connected
             newID = max(granules_labeled(:))+1;
+            newID = max(ID_list);
             for iID = 1:length(ID_list)
                 granules_labeled(granules_labeled==ID_list(iID)) = newID;
             end%iID
@@ -1017,7 +1022,23 @@ end%FCN:poolFagmentedGranules
 
 % -------------------------------------------------------------------------
 
-function [granules_labeled, summary_stats] = finalRefinementAndStats(reshaped_stack, granules_labeled, opt)
+function granules_RElabeled = finalRefinement(granules_labeled)
+% Preallocation
+granules_RElabeled = zeros(size(granules_labeled));
+% Get list of granules
+granuleList = unique(granules_labeled);
+% Iterate over all granules and relabel them
+for iG = 1:length(granuleList)
+    % Get location of current region
+    ind = find(granules_labeled == granuleList(iG));
+    % Relabel with increasing number of IDs
+    granules_RElabeled(ind) = iG;
+end%iG
+end%FCN:finalRefinement
+
+% -------------------------------------------------------------------------
+
+function [granules_labeled, summary_stats] = regionStats(reshaped_stack, granules_labeled, opt)
 % Pool pixels belonging to the same granule
 % --- Get list of granules
 granuleList = unique(granules_labeled);
@@ -1065,7 +1086,7 @@ switch opt.projection_method
         summary_stats.active_region.map = [];
         summary_stats.active_region.method = 'none';
 end%switch projection method
-end%FCN:finalRefinementAndStats
+end%FCN:regionStats
 
 % -------------------------------------------------------------------------
 

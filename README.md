@@ -57,7 +57,7 @@ CalciSeg(stack, *Name*, *Value*)
 - **_refinement_method_** (char) Measure to fine-tune granule assignment during refinement iterations. _Default_: 'rmse'
 	- 'rmse' : Root median square error
 	- 'corr' : Pearson  correlation coefficient                  
-- **_limitPixCount_** (matrix or string) Limits the pixel area per granule _Default_:  [1 inf]
+- **_limitPixCount_** (matrix or char) Limits the pixel area per granule _Default_:  [1 inf]
 	- [a, b] : The minimum (a) and maximum (b) number of pixels that can be assigned to a granule. Note that, the minimum size affects the filter size for the regmax_method input.
 	- 'auto' : An automatic assessment based on the distribution of granule sizes before refinement. Here, a is set to be the 5th quantile and b to be the 95th quantile. The filter size for regmax_method is set to 1.
 - **_corr_thresh_** (number) Threshold for the Pearson correlation coefficient when refinement_method is set to be 'corr'. _Default_: 0.85
