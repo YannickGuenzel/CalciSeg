@@ -153,6 +153,10 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % Version: 03-Oct-24 (R2023a)
 % =========================================================================
 
+% Check whether this is the lates version
+checkVersion(...
+    fileread([mfilename('fullpath'),'.m']),...
+    webread('https://raw.githubusercontent.com/yannickguenzel/CalciSeg/main/code/CalciSeg.m'))
 
 % Validate inputs
 stack = squeeze(stack);
@@ -229,6 +233,16 @@ end%if summary stats
 end%FCN:CalciSeg
 
 % -------------------------------------------------------------------------
+
+function checkVersion(localVersion, GitHubVersion)
+if ~strcmp(localVersion, GitHubVersion)
+    % Display a warning message
+    msg = sprintf(['The local version of the CalciSeg does not match the latest version on GitHub. \n', ...
+        'Please update your script to ensure you are using the most recent version. \n', ...
+        'Latest version can be found at: https://github.com/YannickGuenzel/CalciSeg']);
+    warning('CalciSeg:version',msg);
+end
+end%FCN:checkVersion
 
 function opt = validateInputs(stack, varargin)
 % First, set all parameters to their default value
