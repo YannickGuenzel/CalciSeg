@@ -150,7 +150,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - active_region.method : Method used for binarizing
 %
 %
-% Version: 03-Oct-24 (R2023a)
+% Version: 11-Oct-24 (R2023a)
 % =========================================================================
 
 % Check whether this is the lates version
