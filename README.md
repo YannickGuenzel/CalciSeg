@@ -39,9 +39,9 @@ Running CalciSeg
 ----------------
 Call the function as:
 
-___matlab
+```
 [granules_labeled, summary_stats] = CalciSeg(stack, Name, Value);
-___
+```
 
 ### Required input
 
@@ -146,20 +146,20 @@ ___
 
 ### Example
 
-___matlab
-[granules_labeled, summary_stats] = CalciSeg( \
-    stack, \
-    'projection_method', 'std', \
-    'init_seg_method', 'voronoi', \
-    'regmax_method', 'filtered', \
-    'n_rep', 2, \
-    'refinement_method', 'rmse', \
-    'limitPixCount', [5 300], \
-    'corr_thresh', 0.85, \
-    'fillmissing', true, \
-    'pool_fragments', false, \
+``` matlab
+[granules_labeled, summary_stats] = CalciSeg(...
+    stack, ...
+    'projection_method', 'std', ...
+    'init_seg_method', 'voronoi', ...
+    'regmax_method', 'filtered', ...
+    'n_rep', 25, ...
+    'refinement_method', 'rmse', ...
+    'limitPixCount', [5 100], ...
+    'corr_thresh', 0.85, ...
+    'fillmissing', true, ...
+    'pool_fragments', false, ...
     'temporal_bin', 2);
-___
+```
 
 ### Note on CalciSeg_3D
 
