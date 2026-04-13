@@ -8,75 +8,222 @@ CalciSeg - A versatile approach for unsupervised segmentation of calcium imaging
 
 Contents
 --------
-1.	[About](#about)  
-2.	[Requirements](#requirements)  
-3.	[Running CalciSeg](#running-calciseg)  
-4.	[Changes](#changes)
-5.	[Cite code as](#cite)
-6.	[Funding](#funding)
+1. [About](#about)
+2. [Requirements](#requirements)
+3. [Running CalciSeg](#running-calciseg)
+4. [Output](#output)
+5. [Recent changes](#recent-changes)
+6. [Cite code as](#cite-code-as)
+7. [Funding](#funding)
 
 
 About
 -----
-Recent advances in calcium imaging, including the development of fast and sensitive genetically encoded indicators, high-resolution camera chips for wide-field imaging, and resonant scanning mirrors in laser scanning microscopy, have notably improved the temporal and spatial resolution of functional imaging analysis. Nonetheless, the variability of imaging approaches and brain structures challenges the development of versatile and reliable segmentation methods. Standard techniques, such as manual selection of regions of interest or machine learning solutions, often fall short due to either user bias, non-transferability among systems, or computational demand. To overcome these issues, we developed **CalciSeg**, a data-driven and reproducible approach for unsupervised functional calcium imaging data segmentation. **CalciSeg** addresses the challenges associated with brain structure variability and user bias by offering a computationally efficient solution for automatic image segmentation based on two parameters: regions' size limits and number of refinement iterations. We evaluated **CalciSeg** efficacy on datasets of varied complexity, different insect species (locusts, bees, and cockroaches), and imaging systems (wide-field, confocal, and multiphoton), showing the robustness and generality of our approach. Finally, the user-friendly nature and the open-source availability of **CalciSeg** facilitate the integration of this algorithm into existing analysis pipelines.
+**CalciSeg** is a MATLAB-based method for unsupervised segmentation of calcium imaging data into spatial regions ("granules") using projection-based initialization, temporal similarity, region-size constraints, and optional iterative refinement. It is designed for 2-D or 3-D calcium imaging stacks with spatial dimensions _(x, y)_ and an optional temporal dimension _(time)_.
+
+The current **CalciSeg** function supports multiple projection methods, several initialization strategies, optional refinement, resumable segmentation, fragmented-region pooling, temporal downsampling during segmentation, and per-granule quality metrics.
 
 
 Requirements
 ------------
-In order to run **CalciSeg** you need to install *MATLAB* together with the *Image Processing Toolbox*, the *Statistics and Machine Learning Toolbox*, and the *Parallel Computing Toolbox*.
+To run **CalciSeg**, install MATLAB together with:
+
+- **Image Processing Toolbox**
+- **Statistics and Machine Learning Toolbox**
+- **Parallel Computing Toolbox**
+
+**CalciSeg** uses _parfor_ in several stages. Starting a parallel pool before calling the function is recommended for better performance.
 
 
 Running CalciSeg
 ----------------
-Both **CalciSeg** and **CalciSeg_3D** are MATLAB functions that can be called from anywhere in your code. Note that both depend on the *Parallel Computing Toolbox*. It is reconmended to starts a parallel pool of workers before calling the function.
-For **CalciSeg**, use the following input:
-CalciSeg(stack, *Name*, *Value*)
+Call the function as:
 
-### Input parameter ###
-- stack (matrix): 3-D dataset (x,y,time) that should be segmented.
+___matlab
+[granules_labeled, summary_stats] = CalciSeg(stack, Name, Value);
+___
 
-### Optional input parameter ###
-- **_projection_method_** (char) Method for calculating the projection across time. _Default_: 'std'            
-	- 'std'    : Standard deviation projection
-	- 'mean'   : Mean intensity projection
-	- 'median' : Median intensity projection
-	- 'max'    : Maximum intensity projection
-	- 'min'    : Minimum intensity projection
-	- 'pca'    : Principal component projection. For this, "stack" is projected into PC space.
-	- 'corr'   : Correlation space as local correlation between  neighboring pixels
-	- 'none'   : Applicable when "stack" has no third dimension or when to take the first slice of the 3-D stack
-- **_init_seg_method_** (char) Method for the initial segmentation. _Default_: 'voronoi'
-	- 'voronoi' : Delaunay triangulation
-	- 'corr'    : Local growing based on correlation. This will set 'projection_method' to be 'corr'
-	- 'rICA'    : Reconstruction independent component analysis.
-- **_regmax_method_** (char) Method for determining how to identify local extrema in the intensity projection. _Default_: 'raw'
-	- 'raw'      : Simply apply imregionalmax/-min on the projection. 
-	- 'filtered' : Dilate/erode image to apply moving max/min filter before applying imregionalmax/-min. Note, this will also smooth the correlation space when init_seg_method is set to be 'corr', or the independent components accordingly when it is set to be 'rICA'.
-	- 'both'     : Combine both above-mentioned methods. Note, this is only applicable when init_seg_method is set to be 'voronoi'. 
-- **_n_rep_** (integer) Number of iterations for refining the regions. _Default_: 0
-- **_refinement_method_** (char) Measure to fine-tune granule assignment during refinement iterations. _Default_: 'rmse'
-	- 'rmse' : Root median square error
-	- 'corr' : Pearson  correlation coefficient                  
-- **_limitPixCount_** (matrix or char) Limits the pixel area per granule _Default_:  [1 inf]
-	- [a, b] : The minimum (a) and maximum (b) number of pixels that can be assigned to a granule. Note that, the minimum size affects the filter size for the regmax_method input.
-	- 'auto' : An automatic assessment based on the distribution of granule sizes before refinement. Here, a is set to be the 5th quantile and b to be the 95th quantile. The filter size for regmax_method is set to 1.
-- **_corr_thresh_** (number) Threshold for the Pearson correlation coefficient when refinement_method is set to be 'corr'. _Default_: 0.85
-- **_n_rICA_** (integer) Number of features to extract during reconstruction independent component analysis. _Default_: 0 to use the full number of components. Otherwise provide a number larger than zero for either an undercomplete (n_rICA < number of frames) or overcomplete (n_rICA > number of frames) feature representations.
-- **_n_PCA_** (number) Percentage of the total variance of the data that should be kept if the projection_method is set to 'pca'. The value must be larger than zero and not exceed 100. _Default_: 100
-- **_fillmissing_** (logical) Replace NaNs or Infs by linear interpolation of neighboring, nonmissing values. _Default_: false
-- **_resume_CalciSeg_** (2-D matrix) Map with granule IDs from a previous segmentation session. Providing this input will skip all initial segmentation step and directly jump to refinement. _Default_: []
-- **_pool_fragments_** (logical) Sometimes, granules belonging to the same biological structure are fragmented into one or multiple pieces. To account for this, we calculate the Pearson correlation coefficient between neighboring granules and pool them if the correlation exceeds the threshold set using input 'corr_thresh' (default: 0.85). The neighbor comparison is repeated until no granule pair exceeds the threshold. Note that this setting ignores the upper limit for pixel area per granule since it is applied after the refinement step. _Default_: false
+### Required input
 
-For **CalciSeg_3D**, the input remains similar. Note the additional parameter *aspect_ratio* to account for differences in x-y-z dimensions. Further, the input *stack* is now expected to a 4-D matrix (x,y,z,time) and there is only an option for a minimum region size. See the function's documentation for more information.
+- _stack_ (matrix): calcium imaging dataset.
+  - 3-D input is expected as _(x, y, time)_.
+  - 2-D input is also accepted. In that case, **CalciSeg** automatically adjusts settings to:
+    - _projection_method = 'none'_
+    - _init_seg_method = 'voronoi'_
+    - _refinement_method = 'rmse'_
+    - _temporal_bin = 1_
+
+### Optional input parameters
+
+- **_projection_method_** (char)  
+  Method for calculating the projection across time.  
+  **Default:** _'std'_
+
+  - _'std'_    : standard deviation projection
+  - _'mean'_   : mean intensity projection
+  - _'median'_ : median intensity projection
+  - _'max'_    : maximum intensity projection
+  - _'min'_    : minimum intensity projection
+  - _'pca'_    : principal component projection; the stack is projected into PC space
+  - _'corr'_   : local correlation image based on neighboring pixels
+  - _'none'_   : use the first slice of the stack, or use when no temporal dimension is present
+
+- **_init_seg_method_** (char)  
+  Method for the initial segmentation.  
+  **Default:** _'voronoi'_
+
+  - _'voronoi'_ : Voronoi-style partitioning based on local extrema
+  - _'corr'_    : local growing based on temporal correlation
+  - _'rICA'_    : reconstruction independent component analysis
+
+  **Note:** If _init_seg_method_ is set to _'corr'_, _projection_method_ is automatically set to _'corr'_.
+
+- **_regmax_method_** (char)  
+  Method for identifying local extrema in the projection.  
+  **Default:** _'raw'_
+
+  - _'raw'_      : apply _imregionalmax_ / _imregionalmin_ directly
+  - _'filtered'_ : prefilter with morphological dilation / erosion before extrema detection
+  - _'both'_     : combine raw and filtered extrema detection
+
+  **Note:** _regmax_method = 'both'_ is only applicable with _init_seg_method = 'voronoi'_. Otherwise it is reset to _'raw'_.
+
+- **_n_rep_** (integer)  
+  Number of refinement iterations.  
+  **Default:** _0_
+
+- **_refinement_method_** (char)  
+  Distance measure used during refinement.  
+  **Default:** _'rmse'_
+
+  - _'rmse'_ : root median square error
+  - _'corr'_ : Pearson correlation coefficient
+
+- **_limitPixCount_** (numeric vector or char)  
+  Minimum and maximum pixel area per granule.  
+  **Default:** _[1 inf]_
+
+  - _[a, b]_ : lower and upper pixel-count limits
+  - _'auto'_ : estimate limits from the initial segmentation using the 5th and 95th quantiles of granule sizes
+
+  **Note:** The minimum size also affects the filter size used by _regmax_method_.
+
+- **_corr_thresh_** (scalar number)  
+  Pearson-correlation threshold used when correlation-based decisions are made.  
+  **Default:** _0.85_
+
+- **_n_rICA_** (integer)  
+  Number of features to extract during reconstruction ICA.  
+  **Default:** _0_
+
+  - _0_ uses the full number of components
+  - values _> 0_ allow undercomplete or overcomplete feature representations
+
+- **_n_PCA_** (scalar number)  
+  Percentage of total variance to keep when _projection_method = 'pca'_.  
+  Must be _> 0_ and _<= 100_.  
+  **Default:** _100_
+
+- **_fillmissing_** (logical)  
+  Replace _NaN_ or _Inf_ values by interpolation of neighboring nonmissing values.  
+  **Default:** _false_
+
+- **_resume**CalciSeg**** (2-D matrix)  
+  Label map from a previous segmentation session.  
+  Providing this skips the initial segmentation step and starts from refinement / post-processing.  
+  **Default:** _[]_
+
+- **_pool_fragments_** (logical)  
+  Pool neighboring granules that likely belong to the same biological structure if their average time courses correlate above _corr_thresh_.  
+  The neighbor comparison is repeated until no adjacent pair exceeds the threshold.  
+  **Default:** _false_
+
+  **Note:** This step is applied after refinement and therefore ignores the upper pixel-count limit.
+
+- **_temporal_bin_** (integer)  
+  Temporal downsampling factor for faster segmentation. The stack is binned by averaging every _N_ consecutive frames before segmentation. Final summary statistics are computed from the full-resolution time courses.  
+  **Default:** _1_
+
+### Example
+
+___matlab
+[granules_labeled, summary_stats] = CalciSeg( \
+    stack, \
+    'projection_method', 'std', \
+    'init_seg_method', 'voronoi', \
+    'regmax_method', 'filtered', \
+    'n_rep', 2, \
+    'refinement_method', 'rmse', \
+    'limitPixCount', [5 300], \
+    'corr_thresh', 0.85, \
+    'fillmissing', true, \
+    'pool_fragments', false, \
+    'temporal_bin', 2);
+___
+
+### Note on CalciSeg_3D
+
+**CalciSeg_3D** is provided separately. For current 3D-specific inputs and behavior, consult the inline documentation of that function directly.
 
 
-### Both functions return two variables ###
-- pockets_labeled: resulting segmentation. An ID was assigned to each pixel.
-- summary_stats: summarizing statisitcs.
+Output
+------
+**CalciSeg** returns two outputs:
+
+- **_granules_labeled_**  
+  2-D label map of segmented granules. Its size matches the first two dimensions of _stack_.
+
+- **_summary_stats_**  
+  Structure containing per-granule summary statistics and segmentation metadata.
+
+### Fields in summary_stats
+
+- _projection_  
+  Projection image used during initial segmentation
+
+- _avgTCs_  
+  Mean time course of each granule
+
+- _granule_Corr_  
+  Average within-granule correlation
+
+- _granule_Avg_img_  
+  Mean activity projected back into image space
+
+- _granule_Std_img_  
+  Standard deviation projected back into image space
+
+- _granule_Max_img_  
+  Maximum projected back into image space
+
+- _granule_Min_img_  
+  Minimum projected back into image space
+
+- _granule_Median_img_  
+  Median projected back into image space
+
+- _granule_Corr_img_  
+  Within-granule correlation projected back into image space
+
+- _active_region.map_  
+  Binary map of active regions
+
+- _active_region.method_  
+  Projection method used for active-region binarization
+
+- _quality.SNR_  
+  Per-granule signal-to-noise ratio
+
+- _quality.compactness_  
+  Per-granule compactness  
+  (_4*pi*area / perimeter^2_, where _1_ corresponds to a perfect circle)
 
 
-Changes
--------
+
+Recent changes
+--------------
+VERSION 1.2: Fixed many segmentation and statistics bugs, including issues with handling tiny and huge regions, background labeling, temporal interpolation, projection-specific outputs, split-and-merge logic, NaN and Inf propagation, RNG restoration, zero-variance cases, and parallel execution. Also made input validation stricter for scalar, integer, finite, logical, and ordered parameter constraints. Resilience was improved in temporal binning, prewhitening, and resume or version-check processes. Optimized several key areas by vectorizing correlation-related tasks, rewriting region growth and fragment pooling, simplifying refinement steps, and batching tiny-region merges to reduce unnecessary iterations.
+
 VERSION 1.1: Added options to correct missing data (_fillmissing_), resume a previous segmentation session (_resumeCalciSeg_), and to pool fragmented granules that presumably belong to the same biological structure (_pool_fragments_). Corrected bug in CalciSeg3D.
 
 VERSION 1.0: The initial, NeuroImage version of [CalciSeg](https://doi.org/10.1016/j.neuroimage.2024.120758).
