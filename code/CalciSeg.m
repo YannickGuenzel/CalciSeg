@@ -1,29 +1,28 @@
 function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % [granules_labeled, summary_stats] = CalciSeg(stack, Name, Value)
-% segments the spatial aspects of a 3-D stack (x*y*time) into individual
-% regions ('granules') based on a refined 2D Delaunay triangulation.
-% Note: CalciSeg uses parallel for-loops for the local growing
-% algorithm and the refinement process. It is recommended to start a
-% parallel pool of workers before calling the function.
+% segments a rows-by-columns-by-time stack into spatial regions (granules).
+% Initial segmentation uses extrema-seeded Voronoi cells, correlation-based
+% region growing, or reconstruction ICA. An existing label map can be resumed.
+% Boundary reassignment and connectivity checks can use parallel workers.
 %
-% REQUIRED TOOLBOXES:
-%   - Image Processing Toolbox        (imregionalmax/-min, imdilate, imerode,
+% TOOLBOXES:
+%   - Image Processing Toolbox        (imregionalmax/imregionalmin, imdilate, imerode,
 %                                      bwulterode, bwdist, watershed, bwlabel,
-%                                      regionprops, imbinarize, imgradient,
-%                                      imboxfilt3, strel)
-%   - Statistics and Machine Learning (pca, rica, knnsearch, prctile, quantile)
-%   - Parallel Computing Toolbox      (parfor; runs serially if absent)
+%                                      regionprops, graythresh, imgradient,
+%                                      medfilt2, multithresh, imfill, imgaussfilt,
+%                                      imboxfilt, strel)
+%   - Statistics and Machine Learning Toolbox (pca, rica, knnsearch)
+%   - Parallel Computing Toolbox (optional for parallel execution)
 %
-% Note: in 'voronoi' segmentation the outermost ring of pixels is assigned to
-% the background (ID 0) unless 'keep_border' is true, because edge-seeded
-% regions are removed.
+% With 'keep_border' false, Voronoi initialization assigns all cells seeded
+% on the image edge to background (ID 0). Refinement can reassign background.
 %
 % PRECONDITIONS (caller's responsibility):
 %   - The stack should be MOTION-CORRECTED; residual motion inflates variance
 %     and correlations and corrupts the segmentation.
 %   - Correlation-based steps ('corr' projection/segmentation, refinement
-%     'corr', pool_fragments) assume drift/photobleaching has been removed.
-%     Use 'detrend' ('linear' or 'dff') if the raw traces still drift.
+%     'corr', pool_fragments) are sensitive to drift and photobleaching.
+%     'linear' removes a linear trend. 'dff' rescales around a fixed baseline.
 %
 % METHOD SELECTION (rough guide):
 %   - Sparse, blob-like sources ....... init_seg_method 'corr' (region growing)
@@ -36,7 +35,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %   % Default Voronoi segmentation with summary statistics
 %   [L, stats] = CalciSeg(stack);
 %
-%   % Correlation-based growing on detrended data, silent/headless
+%   % Correlation-based growing with baseline normalization and no progress display
 %   L = CalciSeg(stack, 'init_seg_method','corr', 'detrend','dff', ...
 %                'corr_thresh',0.8, 'verbose',false);
 %
@@ -57,40 +56,39 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                       - 'max'    : Maximum intensity projection
 %                       - 'min'    : Minimum intensity projection
 %                       - 'pca'    : Principal component projection. For
-%                                    this, "stack" is projected into PC 
+%                                    this, "stack" is projected into PC
 %                                    space.
-%                       - 'corr'   : Correlation space as local correlation
-%                                    between neighboring pixels
-%                       - 'none'   : Applicable when "stack" has no third 
-%                                    dimension or when to take the first 
+%                       - 'corr'   : Pearson correlation of each pixel trace
+%                                    with the mean trace of its neighbors.
+%                       - 'none'   : Applicable when "stack" has no third
+%                                    dimension or when to take the first
 %                                    slice of the 3-D stack
 %
 % 'init_seg_method'   : Method for the initial segmentation.
 % (string)              Default: 'voronoi'
-%                       - 'voronoi' : Delaunay triangulation
+%                       - 'voronoi' : Assign pixels to the nearest extrema seeds.
 %                       - 'corr'    : Local growing based on correlation.
 %                                     This will set 'projection_method' to
 %                                     be 'corr'
-%                       - 'rICA'    : Reconstruction independent component 
-%                                     analysis.
+%                       - 'rICA'    : Reconstruction independent component
+%                                     analysis. Use parameter 'rICA_thresh'
+%                                     to limit segmentation to regions with
+%                                     high loadings.
 %
 % 'regmax_method'     : Method for determining how to identify local
 % (string)              extrema in the intensity projection.
 %                       Default: 'raw'
 %                       - 'raw'      : Simply apply imregionalmax/-min on
-%                                      the projection. 
-%                       - 'filtered' : Dilate/erode image to apply moving
-%                                      max/min filter before applying
-%                                      imregionalmax/-min. Note, this
-%                                      will also smooth the correlation 
-%                                      space when init_seg_method is set to
-%                                      be 'corr', or the independent
-%                                      components accordingly when it is 
-%                                      set to be 'rICA'.
+%                                      the projection.
+%                       - 'filtered' : Detect maxima after dilation and
+%                                      minima after erosion in Voronoi mode. In correlation
+%                                      and rICA modes, spatially average the seed map or
+%                                      each loading map over a square neighborhood
+%                                      of width 2*filter_size+1 (replicated edges).
 %                       - 'both'     : Combine both above-mentioned
 %                                      methods. Note, this is only
 %                                      applicable when init_seg_method is
-%                                      set to be 'voronoi'. 
+%                                      set to be 'voronoi'.
 %
 % 'n_rep'             : Number of iterations for refining the regions.
 % (integer)             Default: 0
@@ -104,56 +102,59 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                       - 'rmedse' : Alias for 'rmse' (clearer name).
 %                       - 'corr'   : Pearson correlation coefficient
 %
+% 'rICA_thresh'       : Number of Otsu thresholds used to exclude weakly
+%                       associated pixels following reconstruction
+%                       independent component analysis as initial
+%                       segmentation.
+%                       - integer 1-20 : apply threshold
+%                       - 0            : skip
+%
 % 'limitPixCount'     : Limits the pixel area per granule
 % (matrix or string)    Default:  [1 inf]
 %                       - [a, b] : The minimum (a) and maximum (b) number
 %                                  of pixels that can be assigned to a
 %                                  granule. Note that, the minimum size
-%                                  affects the filter size for the 
+%                                  affects the filter size for the
 %                                  regmax_method input.
 %                       - 'auto' : An automatic assessment based on the
 %                                  distribution of granule sizes before
 %                                  refinement, using the 'auto_quantiles'
 %                                  (default 5th/95th). The filter size for
 %                                  regmax_method is set to 1.
-%                       Semantics: a granule is MERGED when its size is
-%                       strictly below a, and SPLIT when strictly above b.
+%                       Regions below a are merged or dropped if isolated.
+%                       Splitting is attempted above b. The minimum is enforced
+%                       again after the final connectivity check.
 %                       Max-size enforcement is best-effort: shapes that no
 %                       strategy can split are left oversized and listed in
 %                       summary_stats.oversized_ids.
 %
-% 'corr_thresh'       : Threshold for the Pearson correlation coefficient
-% (number)              when refinement_method is set to be 'corr'.
+% 'corr_thresh'       : Default seed and growth threshold for 'corr'
+% (number)              initialization, and strict threshold for fragment pooling.
 %                       Default: 0.85
 %
-% 'n_rICA'            : Number of features to extract during reconstruction 
+% 'n_rICA'            : Number of features to extract during reconstruction
 % (integer)             independent component analysis.
-%                       Default: 0 to use the full number of components.
-%                       Otherwise provide a number larger than zero for
-%                       either an undercomplete (n_rICA < number of frames)
-%                       or overcomplete (n_rICA > number of frames) feature 
-%                       representations.
+%                       Zero (default) selects a count using cumulative PCA
+%                       variance and 'n_PCA'. Positive counts specify the
+%                       number of learned features and may exceed the PCA rank.
 %
 % 'n_PCA'             : Percentage of the total variance of the data that
-% (number)              should be kept if the projection_method is set to
-%                       'pca'. The value must be larger than zero and not
-%                       exceed 100.
-%                       Default: 100
+% (number)              PCA projection should retain, also used to choose the
+%                       feature count for rICA when 'n_rICA' is zero.
+%                       Range: (0, 100]. Default: 100.
 %
-% 'fillmissing'       : Replace NaNs or Infs by linear interpolation of 
-% (logical)             neighboring, nonmissing values.
+% 'fillmissing'       : Fill NaNs and Infs along rows, columns, then time.
+% (logical)             Each axis uses linear filling followed by nearest filling.
 %                       Default: false
 %
 % 'resume_CalciSeg'    : Map with granule IDs from a previous segmentation
-% (2-D matrix)          session. Providing this input will skip all initial
-%                       segmentation step and directly jump to refinement.
+% (2-D matrix)          session. Supplying a map skips initial segmentation.
+%                       Preprocessing and size enforcement still run.
 %                       Default: []
 %
-% 'pool_fragments'    : Sometimes, granules belonging to the same bio-
-% (logical)             logical structure are fragmented into one or
-%                       multiple pieces. To account for this, we
-%                       calculate the Pearson correlation coefficient
-%                       between neighboring granules and pool them if the
+% 'pool_fragments'    : Merge neighboring granules with correlated mean traces.
+% (logical)             The algorithm calculates the Pearson correlation coefficient
+%                       between neighboring granules and pools them if the
 %                       correlation exceeds the threshold set using input
 %                       'corr_thresh' (default: 0.85). The neighbor
 %                       comparison is repeated until no granule pair
@@ -164,7 +165,9 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %
 % 'temporal_bin'      : Temporal downsampling factor for faster
 % (integer)             segmentation. The stack is binned by averaging
-%                       every N consecutive frames before segmentation.
+%                       each complete group of N frames. If fewer than two
+%                       complete bins remain, use all frames without binning.
+%                       Otherwise, segmentation skips any final partial bin.
 %                       Full-resolution time courses are used for the
 %                       final summary statistics.
 %                       Default: 1 (no binning)
@@ -177,8 +180,8 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %
 % 'verbose'           : When true, show progress bars and print status
 % (logical)             messages (projection info, size estimates, solver
-%                       progress). Set to false for silent, headless or
-%                       batch use. Progress bars are additionally suppressed
+%                       progress). Set to false to suppress progress output.
+%                       Warnings remain enabled. Progress bars are suppressed
 %                       automatically when no graphical desktop is available.
 %                       Default: true
 %
@@ -190,12 +193,11 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %
 % 'detrend'           : Temporal detrending applied to the data used for
 % (string)              SEGMENTATION only (summary statistics stay on the raw
-%                       traces). Removes slow drift/photobleaching that would
-%                       otherwise dominate correlation-based steps.
+%                       traces). Choose linear drift removal or baseline normalization.
 %                       - 'none'   : no detrending (default)
 %                       - 'linear' : remove a per-pixel linear trend
-%                       - 'dff'    : Delta F / F using a per-pixel 10th-
-%                                    percentile baseline
+%                       - 'dff'    : (F-F0)/F0, using each pixel's 10th percentile.
+%                                    Nonpositive baselines are set to eps('single').
 %
 % 'spatial_smooth'    : Gaussian sigma (in pixels) applied to the projection
 % (number)              before extrema detection. Larger values suppress
@@ -205,8 +207,10 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % 'seed_on'           : Which extrema seed the Voronoi tessellation.
 % (string)              'both' (default) | 'max' | 'min'.
 %
-% 'keep_border'       : When true, keep edge-seeded granules in 'voronoi' mode
-% (logical)             instead of discarding the outer ring. Default: false.
+% 'keep_border'       : When true, use only extrema seeds in Voronoi mode
+% (logical)             and retain their cells, including cells touching the
+%                       edge. When false, add edge seeds and discard all
+%                       edge-seeded cells during initialization. Default: false.
 %
 % 'pixel_size'        : [dy dx] pixel size used to scale coordinates for
 % (2-vector)            anisotropic Voronoi tessellation. Default: [1 1].
@@ -216,8 +220,10 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % (number or [])        decouple where a region may start vs. how it grows.
 %                       Default: [] (use corr_thresh)
 %
-% 'rica_sd_threshold' : SD threshold used when flipping rICA component signs.
-% (number)              Default: 2
+% 'rica_sd_threshold' : With [] (default), orient components by spatial skewness.
+% (number or [])        A nonnegative value compares mean excursions beyond
+%                       the positive and negative thresholds in standard deviations.
+%                       A tie keeps the fitted sign.
 %
 % 'auto_quantiles'    : [lo hi] quantiles used by limitPixCount 'auto'.
 % (2-vector)            Default: [0.05 0.95]
@@ -237,17 +243,17 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % summary_stats       : Summary statistics for each granule and additional
 %                       information on the segmentation process saved as
 %                       structures.
-%                      - projection           : Projection image used for
-%                                               initial segmentation.
-%                      - avgTCs               : Each granule's mean time 
+%                      - projection           : Preprocessed projection image.
+%                                               rICA uses its dimensions only.
+%                      - avgTCs               : Each granule's mean time
 %                                               course
-%                      - granule_Corr         : Average within-granule 
+%                      - granule_Corr         : Average within-granule
 %                                               correlation
-%                      - granule_Avg_img      : Within-granule average 
+%                      - granule_Avg_img      : Within-granule average
 %                                               activity
-%                      - granule_Std_img      : Each granule's standard  
+%                      - granule_Std_img      : Each granule's standard
 %                                               deviation over time
-%                      - granule_Max_img      : Each granule's maximum 
+%                      - granule_Max_img      : Each granule's maximum
 %                                               value over time
 %                      - granule_Min_img      : Each granule's minimum
 %                                               value over time
@@ -257,10 +263,12 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - active_region.map    : Binary map of active
 %                                               regions based on Otsu's
 %                                               method
-%                      - active_region.method : Method used for binarizing
+%                      - active_region.method : Metric used for the activity mask.
+%                                               PCA uses 'std'.
+%                                               For 'none', the mask is empty.
 %                      - quality.SNR          : Per-granule signal-to-noise
-%                                               ratio (peak value over
-%                                               baseline noise std)
+%                                               ratio (peak minus 10th percentile,
+%                                               divided by difference-based noise).
 %                      - quality.compactness  : Per-granule spatial
 %                                               compactness (4*pi*area /
 %                                               perimeter^2; 1 = circle)
@@ -273,8 +281,11 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 %                      - oversized_ids        : IDs still exceeding the maximum
 %                                               size (max enforcement is
 %                                               best-effort; empty if none).
-%                      - parameters           : Struct of all options actually
-%                                               used for the run (provenance).
+%                      - parameters           : Validated options and derived size
+%                                               settings. refine_iterations records
+%                                               completed passes when n_rep > 0. For rICA,
+%                                               n_rICA_requested stores the input and
+%                                               n_rICA the fitted feature count.
 %
 %
 % Reproducibility: the rICA path is seeded via the 'seed' input and restores
@@ -283,7 +294,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % (e.g. knnsearch tie-breaking, watershed).
 %
 %
-% Version 1.3 | 19-Jul-26 (R2024a)
+% Version 1.4 | 23-Nov-26 (R2024a)
 %
 % =========================================================================
 
@@ -291,8 +302,7 @@ function [granules_labeled, summary_stats] = CalciSeg(stack, varargin)
 % requested). Keep this in sync with the "% Version" line in the header.
 CALCISEG_VERSION = '1.3';
 
-% Validate inputs (only squeeze 4D+ inputs to collapse trailing singletons;
-% squeeze on 3D data can destroy a valid singleton spatial dimension)
+% For higher-dimensional input, collapse singleton dimensions before validation.
 if ndims(stack) > 3
     stack = squeeze(stack);
 end
@@ -318,15 +328,14 @@ end%if not single precision
 if ~all(isfinite(stack), 'all')
     if opt.fillmissing
         stack(isinf(stack)) = NaN;
-        % Fill missing data      
+        % Fill along rows, then columns, then time, with a nearest-value fallback.
         stack = fillmissing(stack, "linear", 1); stack = fillmissing(stack, "nearest", 1);
         stack = fillmissing(stack, "linear", 2); stack = fillmissing(stack, "nearest", 2);
         if ndims(stack) == 3
             stack = fillmissing(stack, "linear", 3);
             stack = fillmissing(stack, "nearest", 3);
         end
-        % An entirely-missing pixel or frame cannot be interpolated and would
-        % otherwise silently corrupt downstream steps (knnsearch, pca, corr).
+        % Reject values still missing after every available axis has been tried.
         if any(~isfinite(stack), 'all')
             error('CalciSeg:fillFailed', ...
                 'fillmissing could not remove all NaN/Inf values (e.g. a completely missing pixel or frame). Please clean the data manually.');
@@ -341,7 +350,7 @@ reshaped_stack_fullres = [];
 if opt.temporal_bin > 1
     [x_s, y_s, t_s] = size(stack);
     t_binned = floor(t_s / opt.temporal_bin);
-    % Guard: binning must leave at least 2 frames
+    % Retain at least two time samples for segmentation.
     if t_binned < 2
         warning('CalciSeg:temporalBin', ...
             'Temporal binning (bin=%d, frames=%d) would leave %d frame(s). Disabling binning.', ...
@@ -350,8 +359,7 @@ if opt.temporal_bin > 1
     else
         reshaped_stack_fullres = reshape(stack, [x_s*y_s, t_s]);
         stack = reshape(stack(:,:,1:t_binned*opt.temporal_bin), [x_s, y_s, opt.temporal_bin, t_binned]);
-        % Use mean then reshape instead of squeeze to prevent collapsing
-        % the time dimension when t_binned happens to equal 1
+        % Preserve both spatial axes, including singleton rows or columns.
         stack = reshape(mean(stack, 3), [x_s, y_s, t_binned]);
         if opt.verbose
             disp(['Temporal binning: ', num2str(t_s), ' -> ', num2str(t_binned), ' frames (bin factor: ', num2str(opt.temporal_bin), ')'])
@@ -373,9 +381,11 @@ end
 
 % Perform initial segmentation (or use a previous segmentation result)
 if ~isempty(opt.resume_CalciSeg)
-    granules_labeled = opt.resume_CalciSeg;
+    % Compact labels in their original numeric type before any conversion.
+    [ids, ~, group] = unique(opt.resume_CalciSeg(:));
+    granules_labeled = reshape(double(group) - double(ids(1) == 0), size(opt.resume_CalciSeg));
 else
-    granules_labeled = initialSegmentation(reshaped_stack, projection, opt);
+    [granules_labeled, opt] = initialSegmentation(reshaped_stack, projection, opt);
 end
 
 % Automatically estimate min/max granule size from the initial segmentation
@@ -418,6 +428,11 @@ end%if pool fragments
 % splitting or a resumed map). No-op when the invariant already holds.
 granules_labeled = checkSplits(granules_labeled, opt.use_parallel);
 
+% Connectivity normalization can expose components below the size minimum.
+if opt.limitPixCount(1) > 1
+    granules_labeled = removeTinyRegions(reshaped_stack, granules_labeled, opt);
+end
+
 % Relabel granules with contiguous IDs ordered by descending size
 granules_labeled = finalRefinement(granules_labeled);
 
@@ -432,23 +447,17 @@ if opt.verbose
     end
 end
 
-% Compute summary statistics if requested. Always report statistics on the
-% raw fluorescence time courses: the full-resolution stack when temporal
-% binning was applied, otherwise the untransformed reshaped stack (which
-% differs from 'reshaped_stack' only when projection_method='pca').
+% Use unbinned fluorescence for statistics, including any imputed samples.
+% Detrending and PCA affect the segmentation data only.
 if nargout>1
     if opt.temporal_bin > 1
-        [granules_labeled, summary_stats] = regionStats(reshaped_stack_fullres, granules_labeled, opt);
+        summary_stats = regionStats(reshaped_stack_fullres, granules_labeled, opt);
     else
-        [granules_labeled, summary_stats] = regionStats(reshaped_stack_raw, granules_labeled, opt);
+        summary_stats = regionStats(reshaped_stack_raw, granules_labeled, opt);
     end
-    % Note: 'projection' is the image used for the initial segmentation and is
-    % derived from the (possibly temporally binned) stack, whereas the
-    % statistics above are computed from the full-resolution raw data.
+    % Keep the projection at the temporal resolution used for segmentation.
     summary_stats.projection = projection;
-    % Provenance: record the full set of options actually used for this run
-    % (including any auto-resolved values such as limitPixCount and
-    % filter_size) so results are self-documenting and reproducible.
+    % Include resolved size limits and, for rICA runs, the fitted feature count.
     summary_stats.parameters = opt;
 end%if summary stats
 
@@ -458,9 +467,9 @@ end%FCN:CalciSeg
 
 function checkVersion(localVersion, url)
 % Compare the local version tag against the "% Version" line of the file
-% published on GitHub and warn if they differ. Runs at most once per MATLAB
-% session (persistent guard), uses a short network timeout, and fails
-% silently when offline so a segmentation run never depends on connectivity.
+% published on GitHub. Warn only when the remote version is newer. The
+% persistent flag limits the check to one attempt while the function is
+% loaded, including when the network request fails.
 persistent alreadyChecked
 if ~isempty(alreadyChecked)
     return
@@ -497,7 +506,7 @@ function checkDependencies()
 % a long run). The Parallel Computing Toolbox is optional (parfor degrades to
 % serial), so it is not required here.
 reqIP = {'imregionalmax','imregionalmin','bwlabel','bwulterode','bwdist', ...
-    'watershed','regionprops','imbinarize','imgradient','imgaussfilt','strel'};
+    'watershed','regionprops','imgradient','imgaussfilt','strel'};
 reqStats = {'pca','knnsearch','prctile','quantile'};
 missIP = reqIP(cellfun(@(f) isempty(which(f)), reqIP));
 missStats = reqStats(cellfun(@(f) isempty(which(f)), reqStats));
@@ -530,6 +539,7 @@ opt.init_seg_method = 'voronoi';
 opt.regmax_method = 'raw';
 opt.n_rep = 0;
 opt.refinement_method = 'rmse';
+opt.rICA_thresh = 0;
 opt.limitPixCount = [1 inf];
 opt.corr_thresh = 0.85;
 opt.n_rICA = 0;
@@ -548,7 +558,7 @@ opt.keep_border = false;       % keep edge-seeded granules in Voronoi mode
 opt.seed_thresh = [];          % correlation-growing seed threshold ([]=corr_thresh)
 opt.grow_thresh = [];          % correlation-growing growth threshold ([]=corr_thresh)
 opt.pixel_size = [1 1];        % [dy dx] pixel size for anisotropic Voronoi
-opt.rica_sd_threshold = 2;     % SD threshold for rICA component sign flip
+opt.rica_sd_threshold = [];    % skewness by default, tail comparison when supplied
 opt.auto_quantiles = [0.05 0.95]; % quantiles for limitPixCount 'auto'
 opt.use_parallel = true;       % allow parfor (falls back to serial otherwise)
 
@@ -582,7 +592,14 @@ if ~isempty(varargin)
                     else
                         opt.init_seg_method = varargin{iArg+1};
                     end
-                    % Method for smoothing regional maxima ------------------------
+                    % Thresholding after rICA -----------------------------
+                case 'rICA_thresh'
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || ~isfinite(varargin{iArg+1}) || varargin{iArg+1} < 0 || varargin{iArg+1} > 20 || mod(varargin{iArg+1},1) ~= 0
+                        error('CalciSeg:invalidInput', 'Input "rICA_thresh" must be an integer between 0 and 20.');
+                    else
+                        opt.rICA_thresh = double(varargin{iArg+1});
+                    end
+                    % Method for smoothing regional maxima ----------------
                 case 'regmax_method'
                     valid_regmax_methods = {'raw', 'filtered', 'both'};
                     if ~ismember(varargin{iArg+1}, valid_regmax_methods)
@@ -592,12 +609,12 @@ if ~isempty(varargin)
                     end
                     % Number of refinement iterations ----------------------------
                 case 'n_rep'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0
                         error('CalciSeg:invalidInput', 'Input "n_rep" must be a non-negative scalar integer.');
                     else
-                        opt.n_rep = varargin{iArg+1};
+                        opt.n_rep = double(varargin{iArg+1});
                     end
-                    % Distance metric during refinement ---------------------------
+                    % Distance metric during refinement -------------------
                 case 'refinement_method'
                     % 'rmse' here is root-MEDIAN-square error; 'rmedse' is
                     % accepted as a clearer alias and normalized to 'rmse'.
@@ -612,35 +629,34 @@ if ~isempty(varargin)
                     % Minimum and maximum number of pixels per region -------------
                 case 'limitPixCount'
                     val = varargin{iArg+1};
-                    if ~isnumeric(val) && ~strcmp(val, 'auto')
+                    if ~isnumeric(val) && ~((ischar(val) && isrow(val) || isstring(val) && isscalar(val)) && strcmp(val, 'auto'))
                         error('CalciSeg:invalidInput', 'Input "limitPixCount" must be a non-negative pair [min max] or "auto".');
                     elseif isnumeric(val)
-                        if numel(val) ~= 2 || any(val < 0) || val(1) > val(2) || ~isfinite(val(1)) || any(mod(val(isfinite(val)),1) ~= 0)
+                        if ~isreal(val) || ~isvector(val) || numel(val) ~= 2 || isnan(val(2)) || any(val < 0) || val(1) > val(2) || ~isfinite(val(1)) || any(mod(val(isfinite(val)),1) ~= 0)
                             error('CalciSeg:invalidInput', 'Input "limitPixCount" must be [min max] with non-negative integers and finite min (max may be inf).');
                         end
-                        opt.limitPixCount = val;
-                    else
-                        opt.limitPixCount = val;
+                        val = double(val(:)');
                     end
+                    opt.limitPixCount = val;
                     % Correlation threshold ---------------------------------------
                 case 'corr_thresh'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || varargin{iArg+1} > 1
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || ~isfinite(varargin{iArg+1}) || varargin{iArg+1} < 0 || varargin{iArg+1} > 1
                         error('CalciSeg:invalidInput', 'Input "corr_thresh" must be a scalar number between 0 and 1.');
                     else
-                        opt.corr_thresh = varargin{iArg+1};
+                        opt.corr_thresh = double(varargin{iArg+1});
                     end
                     % Number of independent components ----------------------------
                 case 'n_rICA'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0
                         error('CalciSeg:invalidInput', 'Input "n_rICA" must be a non-negative scalar integer.');
                     else
-                        opt.n_rICA = varargin{iArg+1};
+                        opt.n_rICA = double(varargin{iArg+1});
                     end
                 case 'n_PCA'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} <= 0 || varargin{iArg+1} > 100
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || ~isfinite(varargin{iArg+1}) || varargin{iArg+1} <= 0 || varargin{iArg+1} > 100
                         error('CalciSeg:invalidInput', 'Input "n_PCA" must be a scalar number larger than 0 and not exceeding 100.');
                     else
-                        opt.n_PCA = varargin{iArg+1};
+                        opt.n_PCA = double(varargin{iArg+1});
                     end
                 case 'fillmissing'
                     if ~islogical(varargin{iArg+1}) || ~isscalar(varargin{iArg+1})
@@ -650,12 +666,14 @@ if ~isempty(varargin)
                     end
                 case 'resume_CalciSeg'
                     val = varargin{iArg+1};
-                    if ~isnumeric(val) || ~ismatrix(val) || size(val,1) ~= size(stack,1) || size(val,2) ~= size(stack,2)
+                    if isnumeric(val) && isequal(size(val), [0 0])
+                        opt.resume_CalciSeg = [];
+                    elseif ~isnumeric(val) || ~isreal(val) || ~ismatrix(val) || size(val,1) ~= size(stack,1) || size(val,2) ~= size(stack,2)
                         error('CalciSeg:invalidInput', 'Input "resume_CalciSeg" must be a 2-D matrix with the same spatial size as "stack".');
                     elseif any(val(:) < 0) || any(~isfinite(val(:))) || any(mod(val(:),1) ~= 0)
                         error('CalciSeg:invalidInput', 'Input "resume_CalciSeg" must contain only finite, non-negative integers.');
                     else
-                        opt.resume_CalciSeg = single(val);
+                        opt.resume_CalciSeg = val;
                     end
                 case 'pool_fragments'
                     if ~islogical(varargin{iArg+1}) || ~isscalar(varargin{iArg+1})
@@ -664,10 +682,10 @@ if ~isempty(varargin)
                         opt.pool_fragments = varargin{iArg+1};
                     end
                 case 'temporal_bin'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 1 || mod(varargin{iArg+1},1) ~= 0
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 1 || mod(varargin{iArg+1},1) ~= 0
                         error('CalciSeg:invalidInput', 'Input "temporal_bin" must be a positive integer.');
                     else
-                        opt.temporal_bin = varargin{iArg+1};
+                        opt.temporal_bin = double(varargin{iArg+1});
                     end
                 case 'check_update'
                     if ~islogical(varargin{iArg+1}) || ~isscalar(varargin{iArg+1})
@@ -682,10 +700,10 @@ if ~isempty(varargin)
                         opt.verbose = varargin{iArg+1};
                     end
                 case 'seed'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0
-                        error('CalciSeg:invalidInput', 'Input "seed" must be a non-negative scalar integer.');
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || ~isfinite(varargin{iArg+1}) || varargin{iArg+1} < 0 || mod(varargin{iArg+1},1) ~= 0 || varargin{iArg+1} >= 2^32
+                        error('CalciSeg:invalidInput', 'Input "seed" must be an integer in [0, 2^32-1].');
                     else
-                        opt.seed = varargin{iArg+1};
+                        opt.seed = double(varargin{iArg+1});
                     end
                 case 'detrend'
                     valid_detrend = {'none','linear','dff'};
@@ -702,10 +720,10 @@ if ~isempty(varargin)
                         opt.seed_on = varargin{iArg+1};
                     end
                 case 'spatial_smooth'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || ~isfinite(varargin{iArg+1})
+                    if ~isnumeric(varargin{iArg+1}) || ~isreal(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || ~isfinite(varargin{iArg+1})
                         error('CalciSeg:invalidInput', 'Input "spatial_smooth" must be a non-negative finite scalar (Gaussian sigma).');
                     else
-                        opt.spatial_smooth = varargin{iArg+1};
+                        opt.spatial_smooth = double(varargin{iArg+1});
                     end
                 case 'keep_border'
                     if ~islogical(varargin{iArg+1}) || ~isscalar(varargin{iArg+1})
@@ -715,37 +733,37 @@ if ~isempty(varargin)
                     end
                 case 'seed_thresh'
                     v = varargin{iArg+1};
-                    if ~isempty(v) && (~isnumeric(v) || ~isscalar(v) || v < 0 || v > 1)
+                    if ~isnumeric(v) || ~isreal(v) || (~isempty(v) && (~isscalar(v) || ~isfinite(v) || v < 0 || v > 1))
                         error('CalciSeg:invalidInput', 'Input "seed_thresh" must be [] or a scalar between 0 and 1.');
                     else
                         opt.seed_thresh = v;
                     end
                 case 'grow_thresh'
                     v = varargin{iArg+1};
-                    if ~isempty(v) && (~isnumeric(v) || ~isscalar(v) || v < 0 || v > 1)
+                    if ~isnumeric(v) || ~isreal(v) || (~isempty(v) && (~isscalar(v) || ~isfinite(v) || v < 0 || v > 1))
                         error('CalciSeg:invalidInput', 'Input "grow_thresh" must be [] or a scalar between 0 and 1.');
                     else
                         opt.grow_thresh = v;
                     end
                 case 'pixel_size'
                     v = varargin{iArg+1};
-                    if ~isnumeric(v) || numel(v) ~= 2 || any(v <= 0) || any(~isfinite(v))
+                    if ~isnumeric(v) || ~isreal(v) || ~isvector(v) || numel(v) ~= 2 || any(v <= 0) || any(~isfinite(v))
                         error('CalciSeg:invalidInput', 'Input "pixel_size" must be a 2-element positive vector [dy dx].');
                     else
-                        opt.pixel_size = v(:)';
+                        opt.pixel_size = double(v(:)');
                     end
                 case 'rica_sd_threshold'
-                    if ~isnumeric(varargin{iArg+1}) || ~isscalar(varargin{iArg+1}) || varargin{iArg+1} < 0 || ~isfinite(varargin{iArg+1})
-                        error('CalciSeg:invalidInput', 'Input "rica_sd_threshold" must be a non-negative finite scalar.');
-                    else
-                        opt.rica_sd_threshold = varargin{iArg+1};
+                    v = varargin{iArg+1};
+                    if ~isnumeric(v) || ~isreal(v) || (~isempty(v) && (~isscalar(v) || ~isfinite(v) || v < 0))
+                        error('CalciSeg:invalidInput', 'Input "rica_sd_threshold" must be [] or a non-negative finite scalar.');
                     end
+                    opt.rica_sd_threshold = double(v);
                 case 'auto_quantiles'
                     v = varargin{iArg+1};
-                    if ~isnumeric(v) || numel(v) ~= 2 || any(v < 0) || any(v > 1) || v(1) >= v(2)
+                    if ~isnumeric(v) || ~isreal(v) || ~isvector(v) || numel(v) ~= 2 || any(~isfinite(v)) || any(v < 0) || any(v > 1) || v(1) >= v(2)
                         error('CalciSeg:invalidInput', 'Input "auto_quantiles" must be [lo hi] with 0<=lo<hi<=1.');
                     else
-                        opt.auto_quantiles = v(:)';
+                        opt.auto_quantiles = double(v(:)');
                     end
                 case 'use_parallel'
                     if ~islogical(varargin{iArg+1}) || ~isscalar(varargin{iArg+1})
@@ -766,28 +784,6 @@ if ~isempty(varargin)
     end%if mod
 end%if custom arguments
 
-% Warn about parameters that are inert given the chosen methods, so silent
-% no-ops are surfaced to the caller.
-uses_corr = strcmp(opt.init_seg_method,'corr') || strcmp(opt.refinement_method,'corr') || opt.pool_fragments;
-if ismember('n_PCA', supplied) && ~strcmp(opt.projection_method,'pca')
-    warning('CalciSeg:inertParameter', '"n_PCA" is ignored unless projection_method is "pca".');
-end
-if any(ismember({'n_rICA','rica_sd_threshold','seed'}, supplied)) && ~strcmp(opt.init_seg_method,'rICA')
-    warning('CalciSeg:inertParameter', '"n_rICA"/"rica_sd_threshold"/"seed" only affect init_seg_method "rICA".');
-end
-if ismember('corr_thresh', supplied) && ~uses_corr
-    warning('CalciSeg:inertParameter', '"corr_thresh" is ignored unless a correlation step is used (init/refinement "corr" or pool_fragments).');
-end
-if any(ismember({'seed_thresh','grow_thresh'}, supplied)) && ~strcmp(opt.init_seg_method,'corr')
-    warning('CalciSeg:inertParameter', '"seed_thresh"/"grow_thresh" only apply to init_seg_method "corr".');
-end
-if any(ismember({'keep_border','seed_on','pixel_size'}, supplied)) && ~strcmp(opt.init_seg_method,'voronoi')
-    warning('CalciSeg:inertParameter', '"keep_border"/"seed_on"/"pixel_size" only apply to init_seg_method "voronoi".');
-end
-% Degenerate correlation threshold
-if uses_corr && (opt.corr_thresh <= 0 || opt.corr_thresh >= 1)
-    warning('CalciSeg:degenerateThreshold', 'corr_thresh=%g is degenerate (0 merges everything, 1 merges nothing).', opt.corr_thresh);
-end
 % Minimum size cannot exceed the number of pixels
 if isnumeric(opt.limitPixCount) && opt.limitPixCount(1) > size(stack,1)*size(stack,2)
     warning('CalciSeg:sizeLimit', 'limitPixCount(1)=%d exceeds the pixel count (%d); no granule can satisfy it.', opt.limitPixCount(1), size(stack,1)*size(stack,2));
@@ -797,15 +793,16 @@ end
 if ndims(stack) > 3
     error('CalciSeg:invalidStack', 'Number of dimensions of the input "stack" cannot exceed 3.')
 elseif ismatrix(stack)
-    warning('CalciSeg:noTemporalComponent', 'Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_seg_method="voronoi"; refinement_method="rmse"; temporal_bin=1).');
+    warning('CalciSeg:noTemporalComponent', 'Input "stack" has no temporal component. Inputs are adjusted accordingly (projection_method="none"; init_seg_method="voronoi"; refinement_method="rmse"; temporal_bin=1; detrend="none").');
     opt.projection_method = 'none';
     opt.init_seg_method = 'voronoi';
     opt.refinement_method = 'rmse';
     opt.temporal_bin = 1;
+    opt.detrend = 'none';
 end%if invalid 'stack' input
 % For the region-growing approach, both projection_method and
 % opt.init_seg_method must be set to 'corr'
-if strcmp(opt.init_seg_method, 'corr')
+if isempty(opt.resume_CalciSeg) && strcmp(opt.init_seg_method, 'corr')
     if ~strcmp(opt.projection_method, 'corr')
         warning('CalciSeg:forcedProjection', 'When the input "init_seg_method" is set to "corr", the input "projection_method" must be set to "corr" as well. We fixed this.')
         opt.projection_method = 'corr';
@@ -816,6 +813,27 @@ if strcmp(opt.regmax_method, 'both') && ~strcmp(opt.init_seg_method, 'voronoi')
     warning('CalciSeg:regmaxReset', 'regmax_method "both" is only applicable with init_seg_method "voronoi". Setting to "raw".');
     opt.regmax_method = 'raw';
 end%if
+% Check explicit options against the effective computation after method resets.
+initializing = isempty(opt.resume_CalciSeg);
+growing = initializing && strcmp(opt.init_seg_method, 'corr');
+fittingICA = initializing && strcmp(opt.init_seg_method, 'rICA');
+usingPCA = strcmp(opt.projection_method, 'pca') || (fittingICA && opt.n_rICA == 0);
+if ismember('n_PCA', supplied) && ~usingPCA
+    warning('CalciSeg:inertParameter', '"n_PCA" is unused without PCA projection or automatic rICA feature selection.');
+end
+if any(ismember({'n_rICA','rICA_thresh','rica_sd_threshold','seed'}, supplied)) && ~fittingICA
+    warning('CalciSeg:inertParameter', 'The supplied rICA options require rICA initialization.');
+end
+usesThreshold = opt.pool_fragments || (growing && (isempty(opt.seed_thresh) || isempty(opt.grow_thresh)));
+if ismember('corr_thresh', supplied) && ~usesThreshold
+    warning('CalciSeg:inertParameter', '"corr_thresh" is unused with these growth and pooling settings.');
+end
+if any(ismember({'seed_thresh','grow_thresh'}, supplied)) && ~growing
+    warning('CalciSeg:inertParameter', 'Seed and growth thresholds require correlation initialization.');
+end
+if any(ismember({'keep_border','seed_on','pixel_size'}, supplied)) && ~(initializing && strcmp(opt.init_seg_method, 'voronoi'))
+    warning('CalciSeg:inertParameter', 'Voronoi seed options require Voronoi initialization.');
+end
 end%FCN:validateInputs
 
 % -------------------------------------------------------------------------
@@ -825,10 +843,8 @@ function [reshaped_stack, projection, reshaped_stack_raw] = initialPreprocessing
 % image) and reshape the stack into a 2D pixels-by-time matrix.
 % reshaped_stack   : data used for segmentation/refinement (may be
 %                    transformed, e.g. PC scores when projection_method='pca').
-% reshaped_stack_raw: the original pixels-by-time fluorescence, captured
-%                    before any projection modifies the stack. Summary
-%                    statistics are computed on this so that reported time
-%                    courses always reflect the raw data.
+% reshaped_stack_raw: pixels by time before detrending or projection, at the
+%                    input resolution of this helper (possibly binned).
 
 % Get the size of the stack
 [x, y, t] = size(stack);
@@ -836,16 +852,10 @@ function [reshaped_stack, projection, reshaped_stack_raw] = initialPreprocessing
 % Capture the raw pixels-by-time matrix BEFORE any projection method
 % modifies the stack (only 'pca' replaces it with PC scores).
 reshaped_stack_raw = reshape(stack, [x*y, t]);
-
-% Optional temporal detrending of the data used for SEGMENTATION only
-% (statistics stay on the raw traces). Removes slow drift / photobleaching
-% that would otherwise dominate correlation-based steps.
+% Optional detrending or baseline normalization of segmentation data.
 if ~strcmp(opt.detrend, 'none')
     stack = detrendStack(stack, opt.detrend);
 end
-
-% Initialize the projection variable
-projection = [];
 
 % Calculate the projection based on the specified method
 switch opt.projection_method
@@ -886,6 +896,9 @@ switch opt.projection_method
         end
     case 'corr'
         projection = correlationImage(stack, opt);
+        if isempty(opt.resume_CalciSeg) && strcmp(opt.init_seg_method, 'corr') && strcmp(opt.regmax_method, 'filtered')
+            projection = imboxfilt(projection, 2*opt.filter_size + 1, 'Padding', 'replicate');
+        end
     case 'none'
         projection = stack(:,:,1);
 end%switch projection method
@@ -913,29 +926,35 @@ switch method
     case 'linear'
         % detrend works column-wise; transpose so each pixel is a column
         X = detrend(double(X)', 'linear')';
+        stack = reshape(single(X), [x, y, t]);
     case 'dff'
         F0 = prctile(X, 10, 2);
         F0(F0 <= 0) = eps('single');   % guard non-positive baselines
         X = (X - F0) ./ F0;
-end
-stack = reshape(single(X), [x, y, t]);
+        thresh = reshape(F0, [x y]);
+        thresh = thresh > (0.5*min(multithresh(thresh, 20)));
+        thresh = imfill(thresh, 'holes');
+        stack = reshape(single(X), [x, y, t]) .* thresh;
+end%switch
+
 end%FCN:detrendStack
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = initialSegmentation(reshaped_stack, projection, opt)
+function [granules_labeled, opt] = initialSegmentation(reshaped_stack, projection, opt)
 % Perform the initial spatial segmentation using one of three methods:
 % Voronoi tessellation, correlation-based region growing, or rICA.
 switch opt.init_seg_method
     case 'voronoi'
         % Get local maxima and minima
         [regional_maxima, regional_minima] = identifyLocalExtrema(projection, opt);
-        % 2-D Delaunay triangulation
+        % Assign each pixel to its nearest seed in scaled spatial coordinates.
         granules_labeled = triang_extrema(regional_maxima, regional_minima, opt);
     case 'corr'
         granules_labeled = growing_regions(projection, reshaped_stack, opt);
     case 'rICA'
-        granules_labeled = rICA_segmentation(projection, reshaped_stack, opt);
+        opt.n_rICA_requested = opt.n_rICA;
+        [granules_labeled, opt.n_rICA] = rICA_segmentation(projection, reshaped_stack, opt);
         % Check for splits
         granules_labeled = checkSplits(granules_labeled, opt.use_parallel);
 end%switch opt.init_seg_method
@@ -945,13 +964,11 @@ end%FCN:initialSegmentation
 
 function granules_labeled = triang_extrema(regional_maxima, regional_minima, opt)
 % Segment the image via Voronoi tessellation seeded by local extrema.
-% Each pixel is assigned to the nearest extremum centroid using knnsearch
-% (equivalent to a 2-D Delaunay triangulation). Which extrema seed the
-% tessellation is controlled by opt.seed_on; coordinates are scaled by
-% opt.pixel_size for anisotropic pixels. Unless opt.keep_border is true, edge
-% pixels are forced to be seeds and their (border) regions are then removed.
+% Each foreground seed pixel from ultimate erosion is a separate site.
+% opt.seed_on chooses the extrema and opt.pixel_size scales the distances.
+% With keep_border false, add sites on the edge and discard their cells.
 
-% Erode the selected extrema to keep the centroids only
+% Apply ultimate erosion to the selected extrema masks.
 switch opt.seed_on
     case 'both'
         ultimateErosion = bwulterode(regional_maxima>0) + bwulterode(regional_minima>0);
@@ -972,13 +989,12 @@ end
 sy = opt.pixel_size(1); sx = opt.pixel_size(2);
 linearIndices = find(ultimateErosion);
 [Cr, Cc] = ind2sub(size(ultimateErosion), linearIndices);
-C = [Cr*sy, Cc*sx]; clear Cr Cc
+C = [Cr(:)*sy, Cc(:)*sx]; clear Cr Cc
 % Every pixel's (row, col) coordinates, scaled likewise
 [allR, allC] = ind2sub(size(regional_maxima), (1:numel(regional_maxima))');
 allVoxels = [allR*sy, allC*sx];
 clear allR allC
 % Use knnsearch to assign each pixel to the nearest seed point in 'C'
-% (equivalent to a 2-D Delaunay/Voronoi tessellation of the seeds)
 granules_labeled = knnsearch(C, allVoxels);
 % Reshape the resulting index array to the dimensions of the 2D image
 granules_labeled = reshape(granules_labeled, size(regional_maxima));
@@ -999,9 +1015,6 @@ function [regional_maxima, regional_minima] = identifyLocalExtrema(projection, o
 % three methods: raw (direct), filtered (morphological pre-smoothing), or
 % both (union of raw and filtered).
 
-% Initialize output variables
-regional_maxima = [];
-regional_minima = [];
 % The structuring element is only needed by the morphological (non-'raw')
 % methods, so build it lazily to avoid the cost for 'raw'.
 if ~strcmp(opt.regmax_method, 'raw')
@@ -1028,8 +1041,7 @@ end%FCN:identifyLocalExtrema
 % -------------------------------------------------------------------------
 
 function projection = correlationImage(stack, opt)
-% Get a map of local correlations of a pixel with each of its neighbors
-% Uses a vectorized shifted-stack approach for efficiency.
+% Correlate each pixel trace with the mean trace of its in-bounds neighbors.
 [rows, cols, t] = size(stack);
 % Get a mask to identify neighbors
 nMask = strel('disk', opt.filter_size);
@@ -1041,8 +1053,9 @@ nMask(center, center) = 0;
 dr = dr - center;
 dc = dc - center;
 % Compute neighbor mean using shifted stacks
-neighbor_sum = zeros(rows, cols, t, 'single');
-neighbor_count = zeros(rows, cols, 'single');
+stack = double(stack);   % accumulate before computing centered sums of squares
+neighbor_sum = zeros(rows, cols, t);
+neighbor_count = zeros(rows, cols);
 for iN = 1:length(dr)
     src_r = max(1, 1-dr(iN)):min(rows, rows-dr(iN));
     src_c = max(1, 1-dc(iN)):min(cols, cols-dc(iN));
@@ -1063,7 +1076,7 @@ Y = Y - mean(Y, 2);
 projection = sum(X .* Y, 2) ./ sqrt(sum(X.^2, 2) .* sum(Y.^2, 2));
 % Replace NaN (from constant-signal pixels) with 0
 projection(isnan(projection)) = 0;
-projection = reshape(projection, [rows, cols]);
+projection = single(reshape(max(-1, min(1, projection)), [rows, cols]));
 end%FCN:correlationImage
 
 % -------------------------------------------------------------------------
@@ -1071,10 +1084,9 @@ end%FCN:correlationImage
 function granules_labeled = growing_regions(corr_img, reshaped_stack, opt)
 % Greedy correlation-based region growing using BFS boundary tracking.
 % Starting from the pixel with the highest local correlation, a region is
-% grown by iteratively adding neighboring pixels whose time course
-% correlates above corr_thresh with the region's mean time course. Once a
-% region can no longer grow, the next highest-correlation unassigned pixel
-% seeds a new region.
+% grown by adding neighboring pixels whose time-course correlation
+% meets grow_thresh against the region mean. Unassigned pixels can seed a
+% new region when their local correlation meets seed_thresh.
 
 % Separate thresholds for seeding vs. growing (default to corr_thresh)
 seed_thr = opt.corr_thresh;
@@ -1118,7 +1130,7 @@ for iPx = 1:px_cnt
     % Seed a new region
     n_region = 1;
     granules_labeled(max_id) = cnt_id;
-    tc_sum = reshaped_stack(max_id, :);
+    tc_sum = double(reshaped_stack(max_id, :));
     % Initialize boundary from the seed's 4-connected neighbors
     [sr, sc] = ind2sub([nRows, nCols], max_id);
     nr = [sr-1, sr+1, sr, sr];
@@ -1129,22 +1141,15 @@ for iPx = 1:px_cnt
     % Grow region by testing boundary pixels against the mean TC
     while ~isempty(boundary) && n_region < max_size
         curr_TC = tc_sum / n_region;
-        % Limit candidates to respect max_size (skip when max_size is inf)
-        if isfinite(max_size)
-            n_available = max_size - n_region;
-            if length(boundary) > n_available
-                boundary = boundary(1:n_available);
-            end
-        end
-        % Vectorized Pearson correlation of the (fixed) region mean TC against
-        % all candidate boundary pixels at once, replacing the per-pixel
-        % corr() calls. Computed in double to match corr()'s precision.
-        B_tc = reshaped_stack(boundary, :);
-        Bc = double(B_tc) - mean(double(B_tc), 2);
-        vc = double(curr_TC) - mean(double(curr_TC));
+        % Compare each candidate with the same region mean in double precision.
+        B_tc = double(reshaped_stack(boundary, :));
+        Bc = B_tc - mean(B_tc, 2);
+        vc = curr_TC - mean(curr_TC);
         cc = (Bc * vc(:)) ./ (sqrt(sum(Bc.^2, 2)) * sqrt(sum(vc.^2)));
         % Zero-variance pixels give NaN, which fails the threshold (excluded).
-        pass = cc >= grow_thr;
+        % Apply the size cap only after testing the entire boundary.
+        pass = find(cc >= grow_thr);
+        pass = pass(1:min(numel(pass), max_size - n_region));
         added_idx = boundary(pass);
         n_added = numel(added_idx);
         if n_added == 0
@@ -1177,93 +1182,112 @@ end%FCN:growing_regions
 
 % -------------------------------------------------------------------------
 
-function granules_labeled = rICA_segmentation(projection, reshaped_stack, opt)
+function [granules_labeled, nFeatures] = rICA_segmentation(projection, reshaped_stack, opt)
 % Segment using reconstruction independent component analysis (rICA).
-% The data is mean-subtracted, prewhitened, PCA-transformed, and then
-% decomposed into independent components via rica(). Each pixel is assigned
-% to the component with the strongest loading.
+% The data is mean-subtracted, PCA-transformed, reduced, prewhitened, and
+% then decomposed into independent components via rica(). Each pixel is
+% assigned to the component with the strongest standardized loading.
 % Get size of the dataset
 [x, y] = size(projection);
-% Subtract mean since ICA cannot separate sources with a mean signal
-% effect.
+% Center each input feature across pixels before PCA.
+reshaped_stack = double(reshaped_stack);
 reshaped_stack = reshaped_stack-mean(reshaped_stack,1,'omitnan');
+% Apply PCA
+[~,reshaped_stack,latent,~,explained] = pca(reshaped_stack, ...
+    'Centered', false);
+if isempty(latent) || latent(1) <= 0
+    error('CalciSeg:degenerateData', 'rICA requires at least one varying PCA direction.');
+end
+tol = max(size(reshaped_stack)) * eps(latent(1));
+nAvailable = nnz(latent > tol);
+if nAvailable == 0
+    error('CalciSeg:degenerateData', 'rICA requires at least one varying PCA direction.');
+end
+nFeatures = opt.n_rICA;
+if nFeatures == 0
+    nFeatures = find(cumsum(explained(1:nAvailable)) >= opt.n_PCA, 1);
+    if isempty(nFeatures)
+        nFeatures = nAvailable;
+    end
+end
+% Overcomplete fits learn more features than there are input directions.
+reshaped_stack = reshaped_stack(:, 1:min(nFeatures, nAvailable));
 % Prewhiten the signal so that it has zero mean and identity covariance.
 reshaped_stack = prewhiten(reshaped_stack);
-% Apply PCA
-[~,reshaped_stack] = pca(reshaped_stack);
-% Check how many components to request
-if opt.n_rICA==0
-    opt.n_rICA = size(reshaped_stack, 2);
-end
 % Apply reconstruction ICA (rICA)
 rng_state = rng;
 rng_cleanup = onCleanup(@() rng(rng_state));% Restore RNG even if rica throws
-rng(opt.seed);% For reproducibility (configurable via the 'seed' input)
-ricaTransform = rica(reshaped_stack, opt.n_rICA, 'VerbosityLevel', double(opt.verbose));
+rng(opt.seed, 'twister'); % Reproducible independently of the caller's generator.
+ricaTransform = rica(reshaped_stack, nFeatures, 'VerbosityLevel', double(opt.verbose), 'IterationLimit', 5000);
 clear rng_cleanup;% Normal exit: restore now rather than at scope end
 % Transform the data using the fitted model
 transformedData = transform(ricaTransform, reshaped_stack);
-% Correct sign of each component so that the dominant deflection is
-% positive. This is done by z-scoring each component, measuring the mean
-% positive excursion beyond +2 SD and the mean negative excursion beyond
-% -2 SD, and flipping the sign if the negative tail dominates.
-TD = transformedData;
-sdt = opt.rica_sd_threshold;                       % SD threshold for tails
-s = std(TD);
+% Standardize each component across pixels before comparing spatial loadings.
+s = std(transformedData, 0, 1);
 s(s == 0) = 1;% Guard zero-variance components against division by zero
-TDv = TD ./ repmat(s, size(TD,1), 1);             % z-score
-TDzp = TDv - sdt;  TDzp(TDzp < 0) = 0;            % positive tail (>+sdt SD)
-TDzpm = mean(TDzp);
-TDzn = TDv + sdt;  TDzn(TDzn > 0) = 0;            % negative tail (<-sdt SD)
-TDznm = mean(TDzn);
-flip_sign = sign(TDzpm + TDznm);
-flip_sign(flip_sign == 0) = 1;% Ambiguous sign defaults to no flip
-transformedData = TD .* repmat(flip_sign, size(TD, 1), 1);
+TDv = (transformedData - mean(transformedData,1)) ./ s;
+% Use skewness by default or compare excursions beyond the requested SD.
+if isempty(opt.rica_sd_threshold)
+    sign_score = mean(TDv.^3, 1);
+else
+    threshold = opt.rica_sd_threshold;
+    positiveTail = mean(max(TDv - threshold, 0), 1);
+    negativeTail = mean(max(-TDv - threshold, 0), 1);
+    sign_score = positiveTail - negativeTail;
+    sign_score(abs(sign_score) <= 8*eps(max(positiveTail, negativeTail))) = 0;
+end
+flip_sign = ones(1, size(TDv,2));
+flip_sign(sign_score < 0) = -1;
+transformedData = TDv .* flip_sign;
 % Reshape the independent components back into a 3-D format
-reshaped_stack = reshape(transformedData, [x, y, size(transformedData,2)]);
-% Smooth components
+transformedData = reshape(transformedData, [x, y, size(transformedData,2)]);
 if strcmp(opt.regmax_method, 'filtered')
-    reshaped_stack = imboxfilt3(reshaped_stack, [opt.filter_size, opt.filter_size, 1]);
-end%if filter
+    for component = 1:nFeatures
+        transformedData(:,:,component) = imboxfilt(transformedData(:,:,component), ...
+            2*opt.filter_size + 1, 'Padding', 'replicate');
+    end
+end
 % Get the component with the strongest effect on a given pixel
-[~, granules_labeled] = max(reshaped_stack, [], 3);
+[label_load, granules_labeled] = max(transformedData, [], 3);
+% Threshold the median-filtered winning load at the lowest Otsu level.
+if opt.rICA_thresh > 0
+    threshold = min(multithresh(label_load, opt.rICA_thresh));
+    granules_labeled(label_load < threshold) = 0;
+end
 end%FCN:rICA_segmentation
 
 % -------------------------------------------------------------------------
 
 function Z = prewhiten(X)
-    % From https://de.mathworks.com/help/stats/extract-mixed-signals.html
-    % 1. Size of X.
-    [N,P] = size(X); %#ok<ASGLU> — N not used; SVD rank handles wide matrices
-    % 2. SVD of covariance of X. We could also use svd(X) to proceed but N
-    % can be large and so we sacrifice some accuracy for speed.
-    [U,Sig] = svd(cov(X));
-    Sig     = diag(Sig);
-    Sig     = Sig(:)';
-    % 3. Figure out which values of Sig are non-zero.
-    tol = eps(class(X));
-    idx = (Sig > max(Sig)*tol);
-    if all(idx == 0)
-        % All singular values are ~0: the data has no variance to whiten
-        % (e.g. a constant stack). ICA is undefined here, so fail clearly
-        % rather than with a bare assertion deep in the call stack.
-        error('CalciSeg:degenerateData', ...
-            'rICA cannot run on data with no variance (constant or rank-deficient stack).');
-    end
-    % 4. Get the non-zero elements of Sig and corresponding columns of U.
-    Sig = Sig(idx);
-    U   = U(:,idx);
-    % 5. Compute prewhitened data.
-    mu = mean(X,1);
-    Z = X-mu;
-    Z = (Z*U)./sqrt(Sig);
+% From https://de.mathworks.com/help/stats/extract-mixed-signals.html
+% Decompose the feature covariance, retaining directions with positive variance.
+[U,Sig] = svd(cov(X));
+Sig     = diag(Sig);
+Sig     = Sig(:)';
+% Keep singular values above a tolerance relative to the largest value.
+tol = eps(class(X));
+idx = (Sig > max(Sig)*tol);
+if all(idx == 0)
+    % All singular values are ~0: the data has no variance to whiten
+    % (e.g. a constant stack). ICA is undefined here, so fail clearly
+    % rather than with a bare assertion deep in the call stack.
+    error('CalciSeg:degenerateData', ...
+        'rICA cannot run on data with no variance (constant or rank-deficient stack).');
+end
+% Select the retained variances and their covariance directions.
+Sig = Sig(idx);
+U   = U(:,idx);
+% Compute prewhitened data.
+mu = mean(X,1);
+Z = X-mu;
+Z = (Z*U)./sqrt(Sig);
 end%FCN:prewhiten
 
 % -------------------------------------------------------------------------
 
 function [granules_labeled, n_used] = refineSegmentation(reshaped_stack, granules_labeled, opt)
 % Iteratively refine granule boundaries. In each iteration, border pixels
-% are re-assigned to the neighboring granule with the best fit (lowest RMSE
+% are reassigned to the neighboring granule with the best fit (lowest root-median-square error
 % or highest correlation). After each re-assignment pass, split granules
 % are detected and size constraints are enforced. Stops early if the label
 % map converges or begins to oscillate between two states (2-cycle).
@@ -1282,7 +1306,7 @@ for iRep = 1:opt.n_rep
     if show_wb
         waitbar(iRep/opt.n_rep, hWait, ['Refine regions ... ', num2str(iRep),'/',num2str(opt.n_rep)])
     end
-    % Get avg signal trace per granule via single-pass grouped indexing
+    % Get avg signal trace per granule via grouped indexing
     [allIDs, ~, gIdx] = unique(granules_labeled(:));
     bg = allIDs == 0;
     granuleList = allIDs(~bg);
@@ -1303,9 +1327,9 @@ for iRep = 1:opt.n_rep
     % Iterate over all pixels in border regions and check
     % whether they have to be re-assigned.
     previous_granules_labeled = granules_labeled;
-    idx_candidates_newIdentiy = refinement_parfor(idx_candidates, granules_labeled, reshaped_stack, granuleTC, granuleList, opt.refinement_method, opt.use_parallel);
+    idx_candidates_newIdentity = refinement_parfor(idx_candidates, granules_labeled, reshaped_stack, granuleTC, granuleList, opt.refinement_method, opt.use_parallel);
     % Update changed identities
-    granules_labeled(idx_candidates) = idx_candidates_newIdentiy;
+    granules_labeled(idx_candidates) = idx_candidates_newIdentity;
     % Account for splitting of granules. For this, iterate over
     % all granules and check whether the corresponding identity
     % can be found in more than one coherent region
@@ -1332,7 +1356,7 @@ end%FCN:refineSegmentation
 
 % -------------------------------------------------------------------------
 
-function idx_candidates_newIdentiy = refinement_parfor(idx_candidates, granules_labeled, reshaped_stack, granuleTC, granuleList, method, use_parallel)
+function idx_candidates_newIdentity = refinement_parfor(idx_candidates, granules_labeled, reshaped_stack, granuleTC, granuleList, method, use_parallel)
 % Re-assign border pixels to the best-fitting neighboring granule using one
 % of two distance measures:
 %   'corr' : Pearson correlation distance |1 - r|
@@ -1341,10 +1365,12 @@ function idx_candidates_newIdentiy = refinement_parfor(idx_candidates, granules_
 % granules and assigned to the one with the smallest distance. Per-iteration
 % data is pre-extracted so that the full reshaped_stack and granules_labeled
 % matrices are not broadcast to parallel workers.
-if nargin < 7; use_parallel = true; end
 
 % Prepare output of new labels
-idx_candidates_newIdentiy = granules_labeled(idx_candidates);
+idx_candidates_newIdentity = granules_labeled(idx_candidates);
+if isempty(idx_candidates) || isempty(granuleList)
+    return
+end
 [nRows, nCols] = size(granules_labeled);
 nCandidates = length(idx_candidates);
 
@@ -1363,8 +1389,7 @@ for iCan = 1:nCandidates
     neighbor_labels{iCan} = nC;
 end%iCan
 
-% Build ID-to-row map for fast granuleTC lookup (replaces the linear
-% search granuleList == nC(iN) inside the parfor)
+% Map each granule ID to its row in the matrix of mean traces.
 id_to_row = zeros(max(granuleList), 1);
 id_to_row(granuleList) = 1:length(granuleList);
 
@@ -1405,7 +1430,7 @@ parfor (iCan = 1:nCandidates, parMax)
     voronoi_R(~isfinite(voronoi_R)) = NaN;
     if all(isnan(voronoi_R)); continue; end
     [~, iBest] = min(voronoi_R);
-    idx_candidates_newIdentiy(iCan) = nC(iBest);
+    idx_candidates_newIdentity(iCan) = nC(iBest);
 end%iCan
 end%FCN:refinement_parfor
 
@@ -1414,9 +1439,9 @@ end%FCN:refinement_parfor
 function granules_labeled = checkSplits(granules_labeled, use_parallel)
 % Detect and resolve granules that have been split into multiple
 % disconnected components. Each non-contiguous fragment beyond the largest
-% receives a new unique ID. Single-pixel fragments are merged into the
-% nearest neighboring granule (or dropped to background if isolated).
-if nargin < 2; use_parallel = true; end
+% receives a new unique ID when it contains multiple pixels. A singleton
+% joins the most frequent adjacent positive ID (lowest ID on a tie),
+% or becomes background if isolated.
 
 % Identify splitter candidates (granules with >1 connected component).
 % Pre-extract per-granule pixel index lists so that the full
@@ -1457,7 +1482,8 @@ for iGranule = 1:length(splitter_candidates)
         continue;
     end%if only one connected component
     % Component sizes; the largest fragment retains the original ID
-    compSizes = accumarray(L(bw), 1);
+    componentIDs = L(bw);
+    compSizes = accumarray(componentIDs(:), 1);
     [~, largest] = max(compSizes);
     for c = 1:nComp
         if c == largest
@@ -1465,17 +1491,14 @@ for iGranule = 1:length(splitter_candidates)
         end%if largest fragment keeps original ID
         idx = find(L == c);
         if isscalar(idx)
-            % Single-pixel fragment: merge into the majority neighbouring
-            % granule; if it is completely isolated (surrounded only by
-            % background) drop it to background rather than creating a
-            % single-pixel granule.
+            % Assign to an adjacent positive ID, or to background if isolated.
             [pr, pc] = ind2sub(size(granules_labeled), idx);
             nr = [pr-1, pr+1, pr, pr];
             nc = [pc, pc, pc-1, pc+1];
             valid = nr>=1 & nr<=size(granules_labeled,1) & nc>=1 & nc<=size(granules_labeled,2);
             nb_idx = sub2ind(size(granules_labeled), nr(valid), nc(valid));
             nb_idx = nb_idx(~bw(nb_idx));
-            neighbor_IDs = unique(granules_labeled(nb_idx));
+            neighbor_IDs = granules_labeled(nb_idx);
             neighbor_IDs(neighbor_IDs == 0) = [];
             if isempty(neighbor_IDs)
                 granules_labeled(idx) = 0;
@@ -1563,15 +1586,8 @@ while true
         ind_pix = find(bw);
         % Get the current time course
         curr_TC = mean(reshaped_stack(ind_pix, :), 1, 'omitnan');
-        % Get 4-connected neighbors of the region (exclude region itself and background)
-        [pr, pc] = ind2sub([nRows_t, nCols_t], ind_pix);
-        all_nr = [pr-1; pr+1; pr; pr];
-        all_nc = [pc; pc; pc-1; pc+1];
-        valid = all_nr>=1 & all_nr<=nRows_t & all_nc>=1 & all_nc<=nCols_t;
-        nb_idx = sub2ind([nRows_t, nCols_t], all_nr(valid), all_nc(valid));
-        nb_idx = nb_idx(~bw(nb_idx));
-        neighbor_IDs = unique(granules_labeled(nb_idx));
-        neighbor_IDs(neighbor_IDs == 0) = [];
+        % Selected regions have disjoint neighborhoods throughout this batch.
+        neighbor_IDs = neighbor_sets{batch_ids(iB)};
         % Guard: no valid neighbors — assign to background
         if isempty(neighbor_IDs)
             granules_labeled(ind_pix) = 0;
@@ -1589,7 +1605,7 @@ while true
             % Get the rmse or distance based on correlation
             switch opt.refinement_method
                 case 'corr'
-                    min_dist = corrcoef(curr_TC, TCs(iN,:)); min_dist = abs(diff([1, min_dist(2)]));
+                    min_dist = abs(1 - normalizeRows(curr_TC) * normalizeRows(TCs(iN,:))');
                 case 'rmse'
                     min_dist = sqrt(median((curr_TC - TCs(iN,:)).^2));
             end
@@ -1649,27 +1665,27 @@ while true
             % Get the fitted ellipse properties. If the region happens to
             % have several connected components, base the cut on the largest
             % one rather than an arbitrary first component.
-            stats = regionprops(bw, 'Area', 'Centroid', 'MajorAxisLength', 'MinorAxisLength', 'Orientation');
+            stats = regionprops(bw, 'Area', 'Centroid', 'MajorAxisLength', 'Orientation');
             [~, largestComp] = max([stats.Area]);
             ellipse = stats(largestComp);
             longAxis = ellipse.MajorAxisLength;
-            % Get the position and angle of the ellipse
+            % Convert the Cartesian orientation to image coordinates (rows increase downward).
             centerX = ellipse.Centroid(1);
             centerY = ellipse.Centroid(2);
             angle = ellipse.Orientation;
             % Strategy 2: cut perpendicular to the major axis
-            x1 = floor(centerX + (longAxis/2) * sind(angle));
+            x1 = floor(centerX - (longAxis/2) * sind(angle));
             y1 = floor(centerY - (longAxis/2) * cosd(angle));
-            x2 = ceil(centerX - (longAxis/2) * sind(angle));
+            x2 = ceil(centerX + (longAxis/2) * sind(angle));
             y2 = ceil(centerY + (longAxis/2) * cosd(angle));
             bw_cut = cutMaskAlongLine(bw, x1, y1, x2, y2);
             % Strategy 3: If the perpendicular cut did not work, try
             % cutting along the major axis instead.
             if max(bw_cut(:)) <= 1
                 x1 = floor(centerX - (longAxis/2) * cosd(angle));
-                y1 = floor(centerY - (longAxis/2) * sind(angle));
+                y1 = floor(centerY + (longAxis/2) * sind(angle));
                 x2 = ceil(centerX + (longAxis/2) * cosd(angle));
-                y2 = ceil(centerY + (longAxis/2) * sind(angle));
+                y2 = ceil(centerY - (longAxis/2) * sind(angle));
                 bw_cut = cutMaskAlongLine(bw, x1, y1, x2, y2);
             end%if perpendicular cut did not work
         end%if watershed did not work
@@ -1707,8 +1723,8 @@ end%FCN:removeHugeRegions
 function bw_cut = cutMaskAlongLine(bw, x1, y1, x2, y2)
 % Zero out a 1-pixel-wide straight line from (x1,y1) to (x2,y2) on the binary
 % mask 'bw' and return the 4-connected labeling of the result. Used to split
-% a region that watershed could not separate. Endpoint coordinates are
-% clamped to the image bounds.
+% a region that watershed could not separate. Each sampled point is clamped
+% to the image bounds.
 bw_cut = bw;
 numPoints = round(sqrt(size(bw,1)^2 + size(bw,2)^2));
 x = round(linspace(x1, x2, numPoints)); x(x<1)=1; x(x>size(bw_cut,2))=size(bw_cut,2);
@@ -1728,7 +1744,7 @@ function granules_labeled = poolFragmentedGranules(reshaped_stack, granules_labe
 % only for adjacent pairs, and connected components above the threshold
 % are merged. Repeats until no pair exceeds the threshold.
 while true
-    % Get a list of granules via single-pass grouped indexing
+    % Get a list of granules via grouped indexing
     [allIDs, ~, gIdx] = unique(granules_labeled(:));
     bg = allIDs == 0;
     granuleList = allIDs(~bg);
@@ -1740,20 +1756,19 @@ while true
     for iGranule = 1:length(granuleList)
         avgTCs(iGranule,:) = mean(reshaped_stack(pixel_groups{iGranule},:),1,'omitnan');
     end%iGranule
-    % Build adjacency from the label map using 4-connectivity. Using 4- (not
-    % 8-) connectivity means merged granules stay 4-connected, preserving the
-    % connected-granule invariant (pooling is the last step before
-    % finalRefinement, so no split check runs afterwards).
+    % Only granules sharing a horizontal or vertical edge can be pooled.
     % Horizontal pairs
     left = granules_labeled(:, 1:end-1);
     right = granules_labeled(:, 2:end);
     diff_mask = left ~= right & left > 0 & right > 0;
-    pairs_h = [left(diff_mask), right(diff_mask)];
+    left = left(diff_mask); right = right(diff_mask);
+    pairs_h = [left(:), right(:)];
     % Vertical pairs
     top = granules_labeled(1:end-1, :);
     bottom = granules_labeled(2:end, :);
     diff_mask = top ~= bottom & top > 0 & bottom > 0;
-    pairs_v = [top(diff_mask), bottom(diff_mask)];
+    top = top(diff_mask); bottom = bottom(diff_mask);
+    pairs_v = [top(:), bottom(:)];
     % Get unique adjacent pairs
     all_pairs = unique(sort([pairs_h; pairs_v], 2), 'rows');
     if isempty(all_pairs); break; end
@@ -1771,7 +1786,7 @@ while true
     if isempty(combineIDs)
         break
     end%if empty
-    % Get all connected IDs via graph-based component analysis
+    % Graph node numbers are the labels in the current map.
     G = graph(combineIDs(:,1), combineIDs(:,2));
     bin = conncomp(G);
     % Check all groups
@@ -1808,14 +1823,14 @@ end%FCN:finalRefinement
 
 % -------------------------------------------------------------------------
 
-function [granules_labeled, summary_stats] = regionStats(reshaped_stack, granules_labeled, opt)
+function summary_stats = regionStats(reshaped_stack, granules_labeled, opt)
 % Compute summary statistics for each granule: mean time course, within-
 % granule correlation, per-granule projection images (mean, std, min, max,
 % correlation), and quality metrics (SNR, compactness). Also estimates an
 % active-region binary map using Otsu's method on the metric matching the
 % projection method.
 
-% Get list of granules via single-pass grouped indexing
+% Get list of granules via grouped indexing
 [allIDs, ~, gIdx] = unique(granules_labeled(:));
 bg = allIDs == 0;
 granuleList = allIDs(~bg);
@@ -1862,10 +1877,8 @@ for iGranule = 1:nG
     summary_stats.granule_Median_img(idx_granule) = median(summary_stats.avgTCs(iGranule,:), 'omitnan');
     summary_stats.granule_Corr_img(idx_granule) = summary_stats.granule_Corr(iGranule,1);
     % --- Quality metrics ---
-    % SNR: peak above baseline over a robust noise estimate. Noise is derived
-    % from successive differences of the mean trace, which for Gaussian noise
-    % gives sigma = median(|diff|)/0.9539 and is largely insensitive to the
-    % (signal-carrying) transients, unlike a plain std of sub-median samples.
+    % Estimate noise from successive differences of the granule mean trace.
+    % For independent Gaussian noise, median(abs(diff)) is about 0.9539*sigma.
     tc = summary_stats.avgTCs(iGranule, :);
     baseline = prctile(tc, 10);
     noise = median(abs(diff(tc)), 'omitnan') / 0.9539;
@@ -1892,19 +1905,21 @@ if isnumeric(opt.limitPixCount) && isfinite(opt.limitPixCount(2))
 else
     summary_stats.oversized_ids = [];
 end
-% Estimate active regions via Otsu's method on the metric that matches
-% the projection method
-switch opt.projection_method
+% PCA uses temporal standard deviation for the activity mask. 'none' skips it.
+metric = opt.projection_method;
+if strcmp(metric, 'pca')
+    metric = 'std';
+end
+switch metric
     case 'std',    active_img = summary_stats.granule_Std_img;
     case 'mean',   active_img = summary_stats.granule_Avg_img;
     case 'median', active_img = summary_stats.granule_Median_img;
     case 'max',    active_img = summary_stats.granule_Max_img;
     case 'min',    active_img = summary_stats.granule_Min_img;
-    case 'pca',    active_img = summary_stats.granule_Std_img;
     case 'corr',   active_img = summary_stats.granule_Corr_img;
     case 'none',   active_img = [];
 end%switch projection method
-summary_stats.active_region.method = opt.projection_method;
+summary_stats.active_region.method = metric;
 if ~isempty(active_img)
     % Otsu threshold computed over FOREGROUND (granule) pixels only, so the
     % split is not biased by the amount of background in the field of view.
@@ -1931,9 +1946,7 @@ function overallAvg = calculateAverageCorrelation(avg_tc, ind_tc)
 % (rows of ind_tc) and the granule's mean time course (avg_tc).
 % Uses vectorized correlation for efficiency.
 if size(avg_tc, 2)>1
-    X = ind_tc - mean(ind_tc, 2);
-    Y = avg_tc - mean(avg_tc);
-    corr_values = (X * Y') ./ (sqrt(sum(X.^2, 2)) * sqrt(sum(Y.^2)));
+    corr_values = normalizeRows(ind_tc) * normalizeRows(avg_tc)';
     % Sanitize non-finite values (from zero-variance traces) before averaging
     corr_values(~isfinite(corr_values)) = NaN;
     overallAvg = mean(corr_values, 'omitnan');
