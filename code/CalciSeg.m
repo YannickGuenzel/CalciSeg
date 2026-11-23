@@ -1218,7 +1218,7 @@ reshaped_stack = prewhiten(reshaped_stack);
 rng_state = rng;
 rng_cleanup = onCleanup(@() rng(rng_state));% Restore RNG even if rica throws
 rng(opt.seed, 'twister'); % Reproducible independently of the caller's generator.
-ricaTransform = rica(reshaped_stack, nFeatures, 'VerbosityLevel', double(opt.verbose), 'IterationLimit', 5000);
+ricaTransform = rica(single(reshaped_stack), nFeatures, 'VerbosityLevel', double(opt.verbose), 'IterationLimit', 5000);
 clear rng_cleanup;% Normal exit: restore now rather than at scope end
 % Transform the data using the fitted model
 transformedData = transform(ricaTransform, reshaped_stack);
