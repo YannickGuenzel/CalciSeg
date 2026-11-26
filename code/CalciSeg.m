@@ -1251,6 +1251,10 @@ end
 [label_load, granules_labeled] = max(transformedData, [], 3);
 % Threshold the median-filtered winning load at the lowest Otsu level.
 if opt.rICA_thresh > 0
+    min_val = quantile(label_load(:), 1-0.995);
+    max_val = quantile(label_load(:), 0.995);
+    label_load(label_load>max_val) = max_val;
+    label_load(label_load<min_val) = min_val;
     threshold = min(multithresh(label_load, opt.rICA_thresh));
     granules_labeled(label_load < threshold) = 0;
 end
